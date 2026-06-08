@@ -18,6 +18,20 @@
 --   suggested_score        = annual_stockout_pct
 
 WITH
+-- Site building type lookup
+site_building_type AS (
+  SELECT DISTINCT warehouse AS site, building_type
+  FROM (
+    SELECT warehouse, building_type
+    FROM "andes"."ardatalake.ardl_common_prodna__warehouses_enhanced_lookup"
+    WHERE building_type IS NOT NULL
+    UNION ALL
+    SELECT warehouse, building_type
+    FROM "andes"."ardatalake.ardl_common_prodeu__warehouses_enhanced_lookup"
+    WHERE building_type IS NOT NULL
+  ) wh
+),
+
 -- Part description from catalogue
 part_info AS (
   SELECT cat_part AS sto_part,
@@ -284,6 +298,7 @@ metrics AS (
          s.sto_part,
          pi.part_description,
          pn.part_number,
+         bt.building_type,
          s.current_qty,
          s.sto_class,
          s.min_level,
@@ -338,10 +353,12 @@ metrics AS (
            ON soh.site     = s.site
           AND soh.region   = s.region
           AND soh.sto_part = s.sto_part
+    LEFT JOIN site_building_type bt
+           ON bt.site = s.site
 )
 SELECT
   CURRENT_DATE AS snapshot_date,
-  site, region, sto_part AS amzn_part, part_description, part_number,
+  site, region, sto_part AS amzn_part, part_description, part_number, building_type,
   current_qty, sto_class,
   site_oh_qty, r_part_stock,
   min_level, max_level,
@@ -482,5 +499,5 @@ SELECT
         ELSE 0.0 END, 2) AS suggested_score_365d
 
 FROM metrics
-WHERE COALESCE(consumed_365d, 0) > 0 and sto_class = '01 HIGH'
+WHERE COALESCE(consumed_365d, 0) > 0 AND sto_class IN ('01 HIGH', '02 MED', '03 LOW')
 ORDER BY sto_part, suggested_score_150d DESC NULLS LAST, site, part_number
