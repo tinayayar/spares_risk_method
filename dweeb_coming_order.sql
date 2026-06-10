@@ -322,11 +322,19 @@ back_order_totals AS (
   GROUP BY part_no, site
 )
 
-SELECT f.*,
-       COALESCE(b.back_order_qty, 0) AS back_order_qty
+SELECT f.part_no,
+       f.site,
+       f.region,
+       COUNT(DISTINCT f."OrderNumber") AS open_order_count,
+       SUM(f.qtyordered) AS total_qty_on_order,
+       COALESCE(b.back_order_qty, 0) AS back_order_qty,
+       MIN(f."OrderedDate") AS earliest_order_date,
+       MAX(f."OrderedDate") AS latest_order_date,
+       MIN(f.revised_ship_date) AS earliest_revised_ship_date
 FROM filtered f
   LEFT JOIN back_order_totals b
          ON b.part_no = f.part_no
         AND b.site    = f.site
-where revised_ship_date != 'Returned'
-ORDER BY revised_ship_date, f.part_no, f.site, f."OrderNumber"
+WHERE revised_ship_date != 'Returned'
+GROUP BY f.part_no, f.site, f.region, b.back_order_qty
+ORDER BY f.part_no, f.site
