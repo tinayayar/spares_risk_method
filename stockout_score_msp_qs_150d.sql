@@ -23,50 +23,18 @@ target_parts AS (
   WHERE apn IS NOT NULL
 ),
 
--- USP parts: subset of target_parts that should only appear at USP sites
-usp_parts AS (
-  SELECT DISTINCT apn AS sto_part
-  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current_union_view
-  WHERE product = 'USP' AND apn IS NOT NULL
-),
-
--- USP sites: only these sites should appear for USP parts
-usp_sites AS (
-  SELECT site FROM (
-    SELECT 'ABQ1' AS site UNION ALL SELECT 'ACY1' UNION ALL SELECT 'AGS1' UNION ALL SELECT 'AKC1' UNION ALL
-    SELECT 'ATL2' UNION ALL SELECT 'AUS2' UNION ALL SELECT 'AUS3' UNION ALL SELECT 'BDL2' UNION ALL
-    SELECT 'BDL3' UNION ALL SELECT 'BDL4' UNION ALL SELECT 'BFI4' UNION ALL SELECT 'BFL1' UNION ALL
-    SELECT 'BHM1' UNION ALL SELECT 'BOI2' UNION ALL SELECT 'BOS3' UNION ALL SELECT 'BTR1' UNION ALL
-    SELECT 'BWI2' UNION ALL SELECT 'CLE2' UNION ALL SELECT 'CLE3' UNION ALL SELECT 'CLT4' UNION ALL
-    SELECT 'CMH1' UNION ALL SELECT 'CMH4' UNION ALL SELECT 'DAB2' UNION ALL SELECT 'DAL3' UNION ALL
-    SELECT 'DCA1' UNION ALL SELECT 'DEN3' UNION ALL SELECT 'DEN4' UNION ALL SELECT 'DET3' UNION ALL
-    SELECT 'DET6' UNION ALL SELECT 'DFW7' UNION ALL SELECT 'DSM5' UNION ALL SELECT 'DTW1' UNION ALL
-    SELECT 'ELP1' UNION ALL SELECT 'EWR4' UNION ALL SELECT 'EWR9' UNION ALL SELECT 'FAT1' UNION ALL
-    SELECT 'FSD1' UNION ALL SELECT 'FTW6' UNION ALL SELECT 'FWA6' UNION ALL SELECT 'GEG1' UNION ALL
-    SELECT 'GRR1' UNION ALL SELECT 'GYR1' UNION ALL SELECT 'HOU2' UNION ALL SELECT 'HOU6' UNION ALL
-    SELECT 'IGQ1' UNION ALL SELECT 'JAN1' UNION ALL SELECT 'JAX2' UNION ALL SELECT 'JFK8' UNION ALL
-    SELECT 'LAS7' UNION ALL SELECT 'LGA9' UNION ALL SELECT 'LGB3' UNION ALL SELECT 'LGB7' UNION ALL
-    SELECT 'LIT1' UNION ALL SELECT 'LUK2' UNION ALL SELECT 'MCO1' UNION ALL SELECT 'MDW7' UNION ALL
-    SELECT 'MEM4' UNION ALL SELECT 'MIA1' UNION ALL SELECT 'MKC6' UNION ALL SELECT 'MKE1' UNION ALL
-    SELECT 'MKE2' UNION ALL SELECT 'MLI1' UNION ALL SELECT 'MQY1' UNION ALL SELECT 'MSP1' UNION ALL
-    SELECT 'MTN1' UNION ALL SELECT 'OAK4' UNION ALL SELECT 'OKC1' UNION ALL SELECT 'OMA2' UNION ALL
-    SELECT 'ORD5' UNION ALL SELECT 'ORF3' UNION ALL SELECT 'ORH3' UNION ALL SELECT 'OXR1' UNION ALL
-    SELECT 'PAE2' UNION ALL SELECT 'PCW1' UNION ALL SELECT 'PDX8' UNION ALL SELECT 'PDX9' UNION ALL
-    SELECT 'PSP1' UNION ALL SELECT 'PVD2' UNION ALL SELECT 'RDU1' UNION ALL SELECT 'RIC4' UNION ALL
-    SELECT 'ROC1' UNION ALL SELECT 'SAN3' UNION ALL SELECT 'SAT2' UNION ALL SELECT 'SAT3' UNION ALL
-    SELECT 'SAV4' UNION ALL SELECT 'SBD6' UNION ALL SELECT 'SCK6' UNION ALL SELECT 'SLC1' UNION ALL
-    SELECT 'SMF1' UNION ALL SELECT 'STL8' UNION ALL SELECT 'SYR1' UNION ALL SELECT 'TLH2' UNION ALL
-    SELECT 'TPA1' UNION ALL SELECT 'TPA4' UNION ALL SELECT 'TUL2' UNION ALL SELECT 'TUS2' UNION ALL
-    SELECT 'TYS1' UNION ALL SELECT 'VGT1' UNION ALL SELECT 'YEG2' UNION ALL SELECT 'YHM1' UNION ALL
-    SELECT 'YOW3' UNION ALL SELECT 'YXU1' UNION ALL SELECT 'YYC4' UNION ALL SELECT 'YYZ4' UNION ALL
-    SELECT 'SBN1' UNION ALL SELECT 'SHV1' UNION ALL SELECT 'ORF4' UNION ALL
-    SELECT 'BCN1' UNION ALL SELECT 'BGY1' UNION ALL SELECT 'BRE2' UNION ALL SELECT 'BRE4' UNION ALL
-    SELECT 'BRS1' UNION ALL SELECT 'DSA2' UNION ALL SELECT 'DUS4' UNION ALL SELECT 'EMA2' UNION ALL
-    SELECT 'EMA4' UNION ALL SELECT 'ERF1' UNION ALL SELECT 'ETZ2' UNION ALL SELECT 'KTW3' UNION ALL
-    SELECT 'LCY2' UNION ALL SELECT 'LEJ5' UNION ALL SELECT 'MME2' UNION ALL SELECT 'MXP6' UNION ALL
-    SELECT 'NCL1' UNION ALL SELECT 'NUE1' UNION ALL SELECT 'POZ2' UNION ALL SELECT 'PSR2' UNION ALL
-    SELECT 'SCN2' UNION ALL SELECT 'STN6' UNION ALL SELECT 'TRN1'
-  ) t
+-- Site building type lookup
+site_building_type AS (
+  SELECT DISTINCT warehouse AS site, building_type
+  FROM (
+    SELECT warehouse, building_type
+    FROM andes_bi_ext."ardatalake".ardl_common_prodna__warehouses_enhanced_lookup
+    WHERE building_type IS NOT NULL
+    UNION ALL
+    SELECT warehouse, building_type
+    FROM andes_bi_ext."ardatalake".ardl_common_prodeu__warehouses_enhanced_lookup
+    WHERE building_type IS NOT NULL
+  ) wh
 ),
 
 -- Product lookup per apn
@@ -309,6 +277,7 @@ metrics AS (
          s.sto_part AS amazon_pn,
          apm.product,
          pi.part_description,
+         bt.building_type,
          s.sto_class, s.min_level, s.max_level,
          lt.lead_time AS supplier_lead_time,
          COALESCE(soh.site_oh_qty, 0.0) AS site_oh_qty,
@@ -344,6 +313,7 @@ metrics AS (
   FROM stock s
     LEFT JOIN apn_product_model apm ON apm.apn = s.sto_part
     LEFT JOIN part_info pi ON pi.sto_part = s.sto_part AND pi.region = s.region
+    LEFT JOIN site_building_type bt ON bt.site = s.site
     LEFT JOIN consumption c ON c.site = s.site AND c.region = s.region AND c.sto_part = s.sto_part
     LEFT JOIN lead_time lt ON lt.site = s.site AND lt.region = s.region AND lt.part_ordered = s.sto_part
     LEFT JOIN site_oh_qty soh ON soh.site = s.site AND soh.region = s.region AND soh.sto_part = s.sto_part
@@ -352,7 +322,7 @@ metrics AS (
 )
 SELECT
   CURRENT_DATE AS snapshot_date,
-  site, region, sto_part AS "Part", amazon_pn, product, part_description,
+  site, region, sto_part AS "Part", amazon_pn, product, part_description, building_type,
   sto_class, site_oh_qty, min_level, max_level,
   supplier_lead_time, replenishment_time,
 
@@ -404,5 +374,4 @@ SELECT
 
 FROM metrics
 WHERE COALESCE(consumed_365d, 0) > 0 AND sto_class IN ('01 HIGH', '02 MED', '03 LOW')
-  AND (sto_part NOT IN (SELECT sto_part FROM usp_parts) OR site IN (SELECT site FROM usp_sites))
 ORDER BY sto_part, structural_risk_combo_criticality_150d DESC NULLS LAST, site

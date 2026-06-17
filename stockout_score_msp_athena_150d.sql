@@ -23,31 +23,18 @@ target_parts AS (
   WHERE apn IS NOT NULL
 ),
 
--- USP parts: subset of target_parts that should only appear at USP sites
-usp_parts AS (
-  SELECT DISTINCT apn AS sto_part
-  FROM "andes"."bads.rta_spa_hardware_component_replacement_rate_current_union_view"
-  WHERE product = 'USP' AND apn IS NOT NULL
-),
-
--- USP sites: only these sites should appear for USP parts
-usp_sites AS (
-  SELECT site FROM (VALUES
-    ('ABQ1'),('ACY1'),('AGS1'),('AKC1'),('ATL2'),('AUS2'),('AUS3'),('BDL2'),('BDL3'),('BDL4'),
-    ('BFI4'),('BFL1'),('BHM1'),('BOI2'),('BOS3'),('BTR1'),('BWI2'),('CLE2'),('CLE3'),('CLT4'),
-    ('CMH1'),('CMH4'),('DAB2'),('DAL3'),('DCA1'),('DEN3'),('DEN4'),('DET3'),('DET6'),('DFW7'),
-    ('DSM5'),('DTW1'),('ELP1'),('EWR4'),('EWR9'),('FAT1'),('FSD1'),('FTW6'),('FWA6'),('GEG1'),
-    ('GRR1'),('GYR1'),('HOU2'),('HOU6'),('IGQ1'),('JAN1'),('JAX2'),('JFK8'),('LAS7'),('LGA9'),
-    ('LGB3'),('LGB7'),('LIT1'),('LUK2'),('MCO1'),('MDW7'),('MEM4'),('MIA1'),('MKC6'),('MKE1'),
-    ('MKE2'),('MLI1'),('MQY1'),('MSP1'),('MTN1'),('OAK4'),('OKC1'),('OMA2'),('ORD5'),('ORF3'),
-    ('ORH3'),('OXR1'),('PAE2'),('PCW1'),('PDX8'),('PDX9'),('PSP1'),('PVD2'),('RDU1'),('RIC4'),
-    ('ROC1'),('SAN3'),('SAT2'),('SAT3'),('SAV4'),('SBD6'),('SCK6'),('SLC1'),('SMF1'),('STL8'),
-    ('SYR1'),('TLH2'),('TPA1'),('TPA4'),('TUL2'),('TUS2'),('TYS1'),('VGT1'),('YEG2'),('YHM1'),
-    ('YOW3'),('YXU1'),('YYC4'),('YYZ4'),('SBN1'),('SHV1'),('ORF4'),
-    ('BCN1'),('BGY1'),('BRE2'),('BRE4'),('BRS1'),('DSA2'),('DUS4'),('EMA2'),('EMA4'),('ERF1'),
-    ('ETZ2'),('KTW3'),('LCY2'),('LEJ5'),('MME2'),('MXP6'),('NCL1'),('NUE1'),('POZ2'),('PSR2'),
-    ('SCN2'),('STN6'),('TRN1')
-  ) AS t(site)
+-- Site building type lookup
+site_building_type AS (
+  SELECT DISTINCT warehouse AS site, building_type
+  FROM (
+    SELECT warehouse, building_type
+    FROM "andes"."ardatalake.ardl_common_prodna__warehouses_enhanced_lookup"
+    WHERE building_type IS NOT NULL
+    UNION ALL
+    SELECT warehouse, building_type
+    FROM "andes"."ardatalake.ardl_common_prodeu__warehouses_enhanced_lookup"
+    WHERE building_type IS NOT NULL
+  ) wh
 ),
 
 -- Product lookup per apn
@@ -290,6 +277,7 @@ metrics AS (
          s.sto_part AS amazon_pn,
          apm.product,
          pi.part_description,
+         bt.building_type,
          s.sto_class, s.min_level, s.max_level,
          lt.lead_time AS supplier_lead_time,
          COALESCE(soh.site_oh_qty, 0.0) AS site_oh_qty,
@@ -325,6 +313,7 @@ metrics AS (
   FROM stock s
     LEFT JOIN apn_product_model apm ON apm.apn = s.sto_part
     LEFT JOIN part_info pi ON pi.sto_part = s.sto_part AND pi.region = s.region
+    LEFT JOIN site_building_type bt ON bt.site = s.site
     LEFT JOIN consumption c ON c.site = s.site AND c.region = s.region AND c.sto_part = s.sto_part
     LEFT JOIN lead_time lt ON lt.site = s.site AND lt.region = s.region AND lt.part_ordered = s.sto_part
     LEFT JOIN site_oh_qty soh ON soh.site = s.site AND soh.region = s.region AND soh.sto_part = s.sto_part
@@ -333,7 +322,7 @@ metrics AS (
 )
 SELECT
   CURRENT_DATE AS snapshot_date,
-  site, region, sto_part AS "Part", amazon_pn, product, part_description,
+  site, region, sto_part AS "Part", amazon_pn, product, part_description, building_type,
   sto_class, site_oh_qty, min_level, max_level,
   supplier_lead_time, replenishment_time,
 
@@ -385,5 +374,4 @@ SELECT
 
 FROM metrics
 WHERE COALESCE(consumed_365d, 0) > 0 AND sto_class IN ('01 HIGH', '02 MED', '03 LOW')
-  AND (sto_part NOT IN (SELECT sto_part FROM usp_parts) OR site IN (SELECT site FROM usp_sites))
 ORDER BY sto_part, structural_risk_combo_criticality_150d DESC NULLS LAST, site
