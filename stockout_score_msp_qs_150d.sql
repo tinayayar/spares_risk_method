@@ -23,6 +23,52 @@ target_parts AS (
   WHERE apn IS NOT NULL
 ),
 
+-- USP parts: subset of target_parts that should only appear at USP sites
+usp_parts AS (
+  SELECT DISTINCT apn AS sto_part
+  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current_union_view
+  WHERE product = 'USP' AND apn IS NOT NULL
+),
+
+-- USP sites: only these sites should appear for USP parts
+usp_sites AS (
+  SELECT site FROM (
+    SELECT 'ABQ1' AS site UNION ALL SELECT 'ACY1' UNION ALL SELECT 'AGS1' UNION ALL SELECT 'AKC1' UNION ALL
+    SELECT 'ATL2' UNION ALL SELECT 'AUS2' UNION ALL SELECT 'AUS3' UNION ALL SELECT 'BDL2' UNION ALL
+    SELECT 'BDL3' UNION ALL SELECT 'BDL4' UNION ALL SELECT 'BFI4' UNION ALL SELECT 'BFL1' UNION ALL
+    SELECT 'BHM1' UNION ALL SELECT 'BOI2' UNION ALL SELECT 'BOS3' UNION ALL SELECT 'BTR1' UNION ALL
+    SELECT 'BWI2' UNION ALL SELECT 'CLE2' UNION ALL SELECT 'CLE3' UNION ALL SELECT 'CLT4' UNION ALL
+    SELECT 'CMH1' UNION ALL SELECT 'CMH4' UNION ALL SELECT 'DAB2' UNION ALL SELECT 'DAL3' UNION ALL
+    SELECT 'DCA1' UNION ALL SELECT 'DEN3' UNION ALL SELECT 'DEN4' UNION ALL SELECT 'DET3' UNION ALL
+    SELECT 'DET6' UNION ALL SELECT 'DFW7' UNION ALL SELECT 'DSM5' UNION ALL SELECT 'DTW1' UNION ALL
+    SELECT 'ELP1' UNION ALL SELECT 'EWR4' UNION ALL SELECT 'EWR9' UNION ALL SELECT 'FAT1' UNION ALL
+    SELECT 'FSD1' UNION ALL SELECT 'FTW6' UNION ALL SELECT 'FWA6' UNION ALL SELECT 'GEG1' UNION ALL
+    SELECT 'GRR1' UNION ALL SELECT 'GYR1' UNION ALL SELECT 'HOU2' UNION ALL SELECT 'HOU6' UNION ALL
+    SELECT 'IGQ1' UNION ALL SELECT 'JAN1' UNION ALL SELECT 'JAX2' UNION ALL SELECT 'JFK8' UNION ALL
+    SELECT 'LAS7' UNION ALL SELECT 'LGA9' UNION ALL SELECT 'LGB3' UNION ALL SELECT 'LGB7' UNION ALL
+    SELECT 'LIT1' UNION ALL SELECT 'LUK2' UNION ALL SELECT 'MCO1' UNION ALL SELECT 'MDW7' UNION ALL
+    SELECT 'MEM4' UNION ALL SELECT 'MIA1' UNION ALL SELECT 'MKC6' UNION ALL SELECT 'MKE1' UNION ALL
+    SELECT 'MKE2' UNION ALL SELECT 'MLI1' UNION ALL SELECT 'MQY1' UNION ALL SELECT 'MSP1' UNION ALL
+    SELECT 'MTN1' UNION ALL SELECT 'OAK4' UNION ALL SELECT 'OKC1' UNION ALL SELECT 'OMA2' UNION ALL
+    SELECT 'ORD5' UNION ALL SELECT 'ORF3' UNION ALL SELECT 'ORH3' UNION ALL SELECT 'OXR1' UNION ALL
+    SELECT 'PAE2' UNION ALL SELECT 'PCW1' UNION ALL SELECT 'PDX8' UNION ALL SELECT 'PDX9' UNION ALL
+    SELECT 'PSP1' UNION ALL SELECT 'PVD2' UNION ALL SELECT 'RDU1' UNION ALL SELECT 'RIC4' UNION ALL
+    SELECT 'ROC1' UNION ALL SELECT 'SAN3' UNION ALL SELECT 'SAT2' UNION ALL SELECT 'SAT3' UNION ALL
+    SELECT 'SAV4' UNION ALL SELECT 'SBD6' UNION ALL SELECT 'SCK6' UNION ALL SELECT 'SLC1' UNION ALL
+    SELECT 'SMF1' UNION ALL SELECT 'STL8' UNION ALL SELECT 'SYR1' UNION ALL SELECT 'TLH2' UNION ALL
+    SELECT 'TPA1' UNION ALL SELECT 'TPA4' UNION ALL SELECT 'TUL2' UNION ALL SELECT 'TUS2' UNION ALL
+    SELECT 'TYS1' UNION ALL SELECT 'VGT1' UNION ALL SELECT 'YEG2' UNION ALL SELECT 'YHM1' UNION ALL
+    SELECT 'YOW3' UNION ALL SELECT 'YXU1' UNION ALL SELECT 'YYC4' UNION ALL SELECT 'YYZ4' UNION ALL
+    SELECT 'SBN1' UNION ALL SELECT 'SHV1' UNION ALL SELECT 'ORF4' UNION ALL
+    SELECT 'BCN1' UNION ALL SELECT 'BGY1' UNION ALL SELECT 'BRE2' UNION ALL SELECT 'BRE4' UNION ALL
+    SELECT 'BRS1' UNION ALL SELECT 'DSA2' UNION ALL SELECT 'DUS4' UNION ALL SELECT 'EMA2' UNION ALL
+    SELECT 'EMA4' UNION ALL SELECT 'ERF1' UNION ALL SELECT 'ETZ2' UNION ALL SELECT 'KTW3' UNION ALL
+    SELECT 'LCY2' UNION ALL SELECT 'LEJ5' UNION ALL SELECT 'MME2' UNION ALL SELECT 'MXP6' UNION ALL
+    SELECT 'NCL1' UNION ALL SELECT 'NUE1' UNION ALL SELECT 'POZ2' UNION ALL SELECT 'PSR2' UNION ALL
+    SELECT 'SCN2' UNION ALL SELECT 'STN6' UNION ALL SELECT 'TRN1'
+  ) t
+),
+
 -- Product lookup per apn
 apn_product_model AS (
   SELECT DISTINCT apn, product
@@ -114,56 +160,27 @@ lead_time AS (
   GROUP BY site, part_ordered, region
 ),
 
--- Replacements building blocks
-repl_events AS (
-  SELECT evt_code AS event, evt_org AS organization, 'NA' AS region
-  FROM andes_bi_ext."rme-gdl".r5events_apm_na
-  WHERE evt_status = 'C'
-    AND evt_type NOT IN ('STAT','XA','IN','PL','AA','MRC','XL','ATF')
-  UNION
-  SELECT evt_code AS event, evt_org AS organization, 'EU' AS region
-  FROM andes_bi_ext."rme-gdl".r5events_apm_eu
-  WHERE evt_status = 'C'
-    AND evt_type NOT IN ('STAT','XA','IN','PL','AA','MRC','XL','ATF')
-),
-repl_stock AS (
-  SELECT rs.sto_part, COALESCE(rs.sto_prefsup,'N') sto_prefsup,
-         SPLIT_PART(rs.sto_store,'-',1) site, 'NA' region
-  FROM andes_bi_ext."rme-gdl".r5stock_apm_na rs
-  WHERE rs.sto_part IN (SELECT sto_part FROM target_parts)
-  UNION
-  SELECT rs.sto_part, COALESCE(rs.sto_prefsup,'N') sto_prefsup,
-         SPLIT_PART(rs.sto_store,'-',1) site, 'EU' region
-  FROM andes_bi_ext."rme-gdl".r5stock_apm_eu rs
-  WHERE rs.sto_part IN (SELECT sto_part FROM target_parts)
-),
-repl_transactions AS (
-  SELECT trl_event, trl_part AS amzn_part, 'NA' AS region,
-         MAX(trl_date) AS trl_date, SUM(trl_qty) AS trl_qty
-  FROM andes_bi_ext."rme-gdl".r5translines_apm_na
-  WHERE trl_part IN (SELECT sto_part FROM target_parts)
-    AND trl_type = 'I'
-    AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
-    AND DATE(trl_date) <= CURRENT_DATE
-  GROUP BY trl_event, trl_part
-  UNION
-  SELECT trl_event, trl_part AS amzn_part, 'EU' AS region,
-         MAX(trl_date) AS trl_date, SUM(trl_qty) AS trl_qty
-  FROM andes_bi_ext."rme-gdl".r5translines_apm_eu
-  WHERE trl_part IN (SELECT sto_part FROM target_parts)
-    AND trl_type = 'I'
-    AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
-    AND DATE(trl_date) <= CURRENT_DATE
-  GROUP BY trl_event, trl_part
-),
+-- Replacements from pre-computed work order tables
 replacements AS (
-  SELECT DISTINCT e.organization AS site, e.region, t.amzn_part,
-         DATE(t.trl_date) AS replaced_on, e.event AS work_order_id,
-         CAST(t.trl_qty AS FLOAT) AS qty_replaced
-  FROM repl_events e
-    JOIN repl_transactions t ON t.trl_event = e.event AND e.region = t.region
-    JOIN repl_stock s ON t.amzn_part = s.sto_part AND s.site = e.organization
-  WHERE t.amzn_part IS NOT NULL
+  -- USP parts
+  SELECT organization AS site, region, "amazon_apn" AS amzn_part,
+         DATE(trl_date) AS replaced_on,
+         CAST(qty_replaced AS FLOAT) AS qty_replaced
+  FROM andes_bi_ext."ar-performance-n-insights".hw_usp_replacement_work_orders
+  WHERE "amazon_apn" IN (SELECT sto_part FROM target_parts)
+    AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
+    AND DATE(trl_date) <= CURRENT_DATE
+    AND qty_replaced > 0
+  UNION ALL
+  -- UIS parts
+  SELECT organization AS site, region, "amazon_apn" AS amzn_part,
+         DATE(trl_date) AS replaced_on,
+         CAST(qty_replaced AS FLOAT) AS qty_replaced
+  FROM andes_bi_ext."ar-performance-n-insights".hw_uis_work_orders_na_24_months
+  WHERE "amazon_apn" IN (SELECT sto_part FROM target_parts)
+    AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
+    AND DATE(trl_date) <= CURRENT_DATE
+    AND qty_replaced > 0
 ),
 
 consumption AS (
@@ -209,8 +226,8 @@ site_oh_qty AS (
 received_orders AS (
   SELECT rl.ord_org AS site, l.orl_part AS part_ordered,
          CAST(rl.ord_created AS DATE) AS order_created_date,
-         CAST(rl.ord_updated AS DATE) AS order_received_date,
-         DATEDIFF('day', CAST(rl.ord_created AS DATE), CAST(rl.ord_updated AS DATE)) AS rep_time_days,
+         CAST(l.orl_lastsaved AS DATE) AS order_received_date,
+         DATEDIFF('day', CAST(rl.ord_created AS DATE), CAST(l.orl_lastsaved AS DATE)) AS rep_time_days,
          CAST(l.orl_ordqty AS FLOAT) AS orl_ordqty, 'NA' AS region
   FROM andes_bi_ext."rme-gdl".r5orderlines_apm_na l
     INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_na rl
@@ -223,8 +240,8 @@ received_orders AS (
   UNION ALL
   SELECT rl.ord_org AS site, l.orl_part AS part_ordered,
          CAST(rl.ord_created AS DATE) AS order_created_date,
-         CAST(rl.ord_updated AS DATE) AS order_received_date,
-         DATEDIFF('day', CAST(rl.ord_created AS DATE), CAST(rl.ord_updated AS DATE)) AS rep_time_days,
+         CAST(l.orl_lastsaved AS DATE) AS order_received_date,
+         DATEDIFF('day', CAST(rl.ord_created AS DATE), CAST(l.orl_lastsaved AS DATE)) AS rep_time_days,
          CAST(l.orl_ordqty AS FLOAT) AS orl_ordqty, 'EU' AS region
   FROM andes_bi_ext."rme-gdl".r5orderlines_apm_eu l
     INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_eu rl
@@ -387,4 +404,5 @@ SELECT
 
 FROM metrics
 WHERE COALESCE(consumed_365d, 0) > 0 AND sto_class IN ('01 HIGH', '02 MED', '03 LOW')
+  AND (sto_part NOT IN (SELECT sto_part FROM usp_parts) OR site IN (SELECT site FROM usp_sites))
 ORDER BY sto_part, structural_risk_combo_criticality_150d DESC NULLS LAST, site
