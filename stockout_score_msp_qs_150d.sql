@@ -128,9 +128,63 @@ lead_time AS (
   GROUP BY site, part_ordered, region
 ),
 
--- Replacements from pre-computed work order tables
+-- Replacements from pre-computed work order tables + raw building blocks for other products
+-- USP/UIS parts list (for exclusion in raw building blocks)
+usp_uis_parts AS (
+  SELECT DISTINCT apn AS sto_part
+  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current_union_view
+  WHERE product IN ('USP', 'UIS') AND apn IS NOT NULL
+),
+
+-- Raw building blocks for non-USP/UIS products (aligned with replacements_athena.sql)
+repl_events AS (
+  SELECT evt_code AS event, evt_org AS organization, 'NA' AS region
+  FROM andes_bi_ext."rme-gdl".r5events_apm_na
+  WHERE evt_status = 'C'
+    AND evt_type NOT IN ('STAT','XA','IN','PL','AA','MRC','XL','ATF')
+  UNION
+  SELECT evt_code AS event, evt_org AS organization, 'EU' AS region
+  FROM andes_bi_ext."rme-gdl".r5events_apm_eu
+  WHERE evt_status = 'C'
+    AND evt_type NOT IN ('STAT','XA','IN','PL','AA','MRC','XL','ATF')
+),
+repl_stock AS (
+  SELECT rs.sto_part, COALESCE(rs.sto_prefsup,'N') sto_prefsup,
+         SPLIT_PART(rs.sto_store,'-',1) site, 'NA' region
+  FROM andes_bi_ext."rme-gdl".r5stock_apm_na rs
+  WHERE rs.sto_part IN (SELECT sto_part FROM target_parts)
+    AND rs.sto_part NOT IN (SELECT sto_part FROM usp_uis_parts)
+  UNION
+  SELECT rs.sto_part, COALESCE(rs.sto_prefsup,'N') sto_prefsup,
+         SPLIT_PART(rs.sto_store,'-',1) site, 'EU' region
+  FROM andes_bi_ext."rme-gdl".r5stock_apm_eu rs
+  WHERE rs.sto_part IN (SELECT sto_part FROM target_parts)
+    AND rs.sto_part NOT IN (SELECT sto_part FROM usp_uis_parts)
+),
+repl_transactions AS (
+  SELECT trl_event, trl_part AS amzn_part, 'NA' AS region,
+         MAX(trl_date) AS trl_date, SUM(trl_qty) AS trl_qty
+  FROM andes_bi_ext."rme-gdl".r5translines_apm_na
+  WHERE trl_part IN (SELECT sto_part FROM target_parts)
+    AND trl_part NOT IN (SELECT sto_part FROM usp_uis_parts)
+    AND trl_type = 'I'
+    AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
+    AND DATE(trl_date) <= CURRENT_DATE
+  GROUP BY trl_event, trl_part
+  UNION
+  SELECT trl_event, trl_part AS amzn_part, 'EU' AS region,
+         MAX(trl_date) AS trl_date, SUM(trl_qty) AS trl_qty
+  FROM andes_bi_ext."rme-gdl".r5translines_apm_eu
+  WHERE trl_part IN (SELECT sto_part FROM target_parts)
+    AND trl_part NOT IN (SELECT sto_part FROM usp_uis_parts)
+    AND trl_type = 'I'
+    AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
+    AND DATE(trl_date) <= CURRENT_DATE
+  GROUP BY trl_event, trl_part
+),
+
 replacements AS (
-  -- USP parts
+  -- USP parts from pre-computed table
   SELECT organization AS site, region, "amazon_apn" AS amzn_part,
          DATE(trl_date) AS replaced_on,
          CAST(qty_replaced AS FLOAT) AS qty_replaced
@@ -138,9 +192,8 @@ replacements AS (
   WHERE "amazon_apn" IN (SELECT sto_part FROM target_parts)
     AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
     AND DATE(trl_date) <= CURRENT_DATE
-    AND qty_replaced > 0
   UNION ALL
-  -- UIS parts
+  -- UIS parts from pre-computed table
   SELECT organization AS site, region, "amazon_apn" AS amzn_part,
          DATE(trl_date) AS replaced_on,
          CAST(qty_replaced AS FLOAT) AS qty_replaced
@@ -148,7 +201,15 @@ replacements AS (
   WHERE "amazon_apn" IN (SELECT sto_part FROM target_parts)
     AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
     AND DATE(trl_date) <= CURRENT_DATE
-    AND qty_replaced > 0
+  UNION ALL
+  -- Other products from raw building blocks (no catalogue/supplier filter)
+  SELECT DISTINCT e.organization AS site, e.region, t.amzn_part,
+         DATE(t.trl_date) AS replaced_on,
+         CAST(t.trl_qty AS FLOAT) AS qty_replaced
+  FROM repl_events e
+    JOIN repl_transactions t ON t.trl_event = e.event AND e.region = t.region
+    JOIN repl_stock s ON t.amzn_part = s.sto_part AND s.site = e.organization
+  WHERE t.amzn_part IS NOT NULL
 ),
 
 consumption AS (
@@ -365,7 +426,7 @@ SELECT
   ROUND(CASE WHEN supplier_lead_time > 0 AND CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END IS NOT NULL THEN (supplier_lead_time - (CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END)) / supplier_lead_time ELSE NULL END, 4) AS situational_score_150d,
   GREATEST(0.0, ROUND(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * (CASE WHEN supplier_lead_time > 0 AND CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END IS NOT NULL THEN (supplier_lead_time - (CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END)) / supplier_lead_time ELSE NULL END), 4)) AS situational_score_criticality_150d,
   GREATEST(0.0, ROUND(COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * (CASE WHEN supplier_lead_time > 0 AND CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END IS NOT NULL THEN (supplier_lead_time - (CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END)) / supplier_lead_time ELSE NULL END), 0.0) + COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * GREATEST(ROUND(LEAST(365.0, GREATEST(0.0, CASE WHEN COALESCE(avg_rep_time_days, 0.0) * COALESCE(rate_150d, 0.0) > 0 AND cycle_length_days_150d > 0 THEN (1.0 - LEAST(1.0, min_level / (avg_rep_time_days * rate_150d))) * avg_rep_time_days * (365.0 / cycle_length_days_150d) ELSE 0.0 END)), 2), ROUND(LEAST(365.0, CASE WHEN cycle_length_days_150d > 0 AND replenishment_demand_150d > 0 THEN (365.0 / cycle_length_days_150d) * ((1.0 - LEAST(1.0, min_level / replenishment_demand_150d)) * replenishment_time) ELSE 0.0 END), 2)) / 365.0, 0.0), 4)) AS overall_score_criticality_150d,
-  GREATEST(0.0, SUM(COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * (CASE WHEN supplier_lead_time > 0 AND CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END IS NOT NULL THEN (supplier_lead_time - (CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END)) / supplier_lead_time ELSE NULL END), 0.0)) OVER (PARTITION BY site)) AS site_sum_situational_score_criticality_150d,
+  SUM(GREATEST(0.0, COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * (CASE WHEN supplier_lead_time > 0 AND CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END IS NOT NULL THEN (supplier_lead_time - (CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END)) / supplier_lead_time ELSE NULL END), 0.0))) OVER (PARTITION BY site) AS site_sum_situational_score_criticality_150d,
   GREATEST(0.0, SUM(COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * GREATEST(ROUND(LEAST(365.0, GREATEST(0.0, CASE WHEN COALESCE(avg_rep_time_days, 0.0) * COALESCE(rate_150d, 0.0) > 0 AND cycle_length_days_150d > 0 THEN (1.0 - LEAST(1.0, min_level / (avg_rep_time_days * rate_150d))) * avg_rep_time_days * (365.0 / cycle_length_days_150d) ELSE 0.0 END)), 2), ROUND(LEAST(365.0, CASE WHEN cycle_length_days_150d > 0 AND replenishment_demand_150d > 0 THEN (365.0 / cycle_length_days_150d) * ((1.0 - LEAST(1.0, min_level / replenishment_demand_150d)) * replenishment_time) ELSE 0.0 END), 2)) / 365.0, 0.0)) OVER (PARTITION BY site)) AS site_sum_structural_risk_combo_criticality_150d,
   CASE WHEN COALESCE(rate_150d, 0.0) > 0 THEN DATEADD('day', CAST((COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / rate_150d AS INTEGER), CURRENT_DATE) ELSE NULL END AS depletion_date_150d,
   CASE WHEN COALESCE(rate_150d, 0.0) > 0 AND supplier_lead_time IS NOT NULL THEN DATEADD('day', CAST((COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / rate_150d - supplier_lead_time AS INTEGER), CURRENT_DATE) ELSE NULL END AS projected_order_date_150d,
