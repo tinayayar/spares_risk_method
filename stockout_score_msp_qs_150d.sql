@@ -19,7 +19,7 @@ WITH
 -- Target parts from bads.rta_spa_hardware_component_replacement_rate table
 target_parts AS (
   SELECT DISTINCT apn AS sto_part
-  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current_union_view
+  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current
   WHERE apn IS NOT NULL
 ),
 
@@ -40,7 +40,7 @@ site_building_type AS (
 -- Product lookup per apn
 apn_product_model AS (
   SELECT DISTINCT apn, product
-  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current_union_view
+  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current
   WHERE apn IS NOT NULL
 ),
 
@@ -132,7 +132,7 @@ lead_time AS (
 -- USP/UIS parts list (for exclusion in raw building blocks)
 usp_uis_parts AS (
   SELECT DISTINCT apn AS sto_part
-  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current_union_view
+  FROM andes_bi_ext."bads".rta_spa_hardware_component_replacement_rate_current
   WHERE product IN ('USP', 'UIS') AND apn IS NOT NULL
 ),
 
