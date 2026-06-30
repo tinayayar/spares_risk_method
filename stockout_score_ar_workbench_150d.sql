@@ -454,7 +454,7 @@ FROM metrics
 WHERE COALESCE(consumed_365d, 0) > 0 AND sto_class IN ('01 HIGH', '02 MED', '03 LOW')
 ) stockout
 
-INNER JOIN "andes"."skydatacatalog"."gss-pi-dweeb-hx-order" hx
+INNER JOIN "andes"."skydatacatalog"."dweeb_hx_order" hx
         ON hx.site = stockout.site
        AND hx.part_no = stockout.part_number
 
@@ -464,7 +464,7 @@ LEFT JOIN (
          SUM(qtyordered) AS co_total_qty_on_order,
          MAX(back_order_qty) AS co_back_order_qty,
          MIN(revised_ship_date) AS co_earliest_revised_ship_date
-  FROM "andes"."skydatacatalog"."gss-pi-dweeb-coming-order"
+  FROM "andes"."skydatacatalog"."dweeb_coming_order"
   WHERE revised_ship_date != 'Returned'
   GROUP BY part_no, site
 ) co
