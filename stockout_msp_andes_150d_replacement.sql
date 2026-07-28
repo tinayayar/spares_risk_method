@@ -1,6 +1,6 @@
--- stockout_msp_qs_150d_replacement.sql
+-- stockout_msp_andes_150d_replacement.sql
 -- Stockout Score Calculation — parts from hw_part_family_site_equipment_consumption
--- QuickSight/Redshift variant — uses andes_bi_ext."rme-gdl".tablename schema prefix.
+-- Andes/SDL variant — uses "andes"."rme-gdl.tablename" schema prefix.
 -- Part inclusion: APNs from ar-performance-n-insights.hw_part_family_site_equipment_consumption
 -- Consumption source: est_total_consumption from same table
 --
@@ -20,7 +20,7 @@ WITH
 -- Target parts from hw_part_family_site_equipment_consumption
 target_parts AS (
   SELECT DISTINCT apn AS sto_part
-  FROM andes_bi_ext."ar-performance-n-insights".hw_part_family_site_equipment_consumption
+  FROM hw_part_family_site_equipment_consumption
   WHERE apn IS NOT NULL
 ),
 
@@ -29,11 +29,11 @@ site_building_type AS (
   SELECT DISTINCT warehouse AS site, building_type
   FROM (
     SELECT warehouse, building_type
-    FROM andes_bi_ext."ardatalake".ardl_common_prodna__warehouses_enhanced_lookup
+    FROM ardl_common_prodna__warehouses_enhanced_lookup
     WHERE building_type IS NOT NULL
     UNION ALL
     SELECT warehouse, building_type
-    FROM andes_bi_ext."ardatalake".ardl_common_prodeu__warehouses_enhanced_lookup
+    FROM ardl_common_prodeu__warehouses_enhanced_lookup
     WHERE building_type IS NOT NULL
   ) wh
 ),
@@ -41,7 +41,7 @@ site_building_type AS (
 -- Product/equipment lookup per apn per site (deduplicated to one product per apn+site)
 apn_product_model AS (
   SELECT apn, site, MAX(equipment) AS product
-  FROM andes_bi_ext."ar-performance-n-insights".hw_part_family_site_equipment_consumption
+  FROM hw_part_family_site_equipment_consumption
   WHERE apn IS NOT NULL
   GROUP BY apn, site
 ),
@@ -54,12 +54,12 @@ part_info AS (
          region
   FROM (
     SELECT c.cat_part, c.cat_desc, 'NA' AS region
-    FROM andes_bi_ext."rme-gdl".r5catalogue_apm_na c
+    FROM r5catalogue_apm_na c
     WHERE c.cat_part IN (SELECT sto_part FROM target_parts)
       AND c.cat_desc IS NOT NULL
     UNION ALL
     SELECT c.cat_part, c.cat_desc, 'EU' AS region
-    FROM andes_bi_ext."rme-gdl".r5catalogue_apm_eu c
+    FROM r5catalogue_apm_eu c
     WHERE c.cat_part IN (SELECT sto_part FROM target_parts)
       AND c.cat_desc IS NOT NULL
   ) cat_d
@@ -75,21 +75,21 @@ stock AS (
     FROM (
       SELECT SPLIT_PART(st.sto_store, '-', 1) AS site,
              st.sto_part,
-             MAX(CAST(st.sto_minlev AS FLOAT)) AS min_level,
-             MAX(CAST(st.sto_maxqty AS FLOAT)) AS max_level,
+             MAX(CAST(st.sto_minlev AS DOUBLE)) AS min_level,
+             MAX(CAST(st.sto_maxqty AS DOUBLE)) AS max_level,
              MAX(st.sto_class) AS sto_class,
              'NA' AS region
-      FROM andes_bi_ext."rme-gdl".r5stock_apm_na st
+      FROM r5stock_apm_na st
       WHERE st.sto_part IN (SELECT sto_part FROM target_parts)
       GROUP BY SPLIT_PART(st.sto_store, '-', 1), st.sto_part
       UNION ALL
       SELECT SPLIT_PART(st.sto_store, '-', 1) AS site,
              st.sto_part,
-             MAX(CAST(st.sto_minlev AS FLOAT)) AS min_level,
-             MAX(CAST(st.sto_maxqty AS FLOAT)) AS max_level,
+             MAX(CAST(st.sto_minlev AS DOUBLE)) AS min_level,
+             MAX(CAST(st.sto_maxqty AS DOUBLE)) AS max_level,
              MAX(st.sto_class) AS sto_class,
              'EU' AS region
-      FROM andes_bi_ext."rme-gdl".r5stock_apm_eu st
+      FROM r5stock_apm_eu st
       WHERE st.sto_part IN (SELECT sto_part FROM target_parts)
       GROUP BY SPLIT_PART(st.sto_store, '-', 1), st.sto_part
     ) sto_raw
@@ -101,33 +101,33 @@ stock AS (
 order_lead_times AS (
   SELECT rl.ord_org                   AS site,
          l.orl_part                   AS part_ordered,
-         CAST(cat_leadtime AS FLOAT)  AS supplier_lead_time,
+         CAST(cat_leadtime AS DOUBLE)  AS supplier_lead_time,
          CAST(rl.ord_created AS DATE) AS order_created_date,
          'NA' AS region
-  FROM andes_bi_ext."rme-gdl".r5orderlines_apm_na l
-    INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_na rl
-            ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
-    LEFT JOIN andes_bi_ext."rme-gdl".r5catalogue_apm_na
+  FROM r5orderlines_apm_na l
+    INNER JOIN r5orders_apm_na rl
+            ON trim(cast(l.orl_order AS STRING)) = trim(cast(rl.ord_code AS STRING))
+    LEFT JOIN r5catalogue_apm_na
            ON cat_part     = l.orl_part
           AND cat_supplier = l.orl_supplier
     AND l.orl_part IN (SELECT sto_part FROM target_parts)
   UNION ALL
   SELECT rl.ord_org                   AS site,
          l.orl_part                   AS part_ordered,
-         CAST(cat_leadtime AS FLOAT)  AS supplier_lead_time,
+         CAST(cat_leadtime AS DOUBLE)  AS supplier_lead_time,
          CAST(rl.ord_created AS DATE) AS order_created_date,
          'EU' AS region
-  FROM andes_bi_ext."rme-gdl".r5orderlines_apm_eu l
-    INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_eu rl
-            ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
-    LEFT JOIN andes_bi_ext."rme-gdl".r5catalogue_apm_eu
+  FROM r5orderlines_apm_eu l
+    INNER JOIN r5orders_apm_eu rl
+            ON trim(cast(l.orl_order AS STRING)) = trim(cast(rl.ord_code AS STRING))
+    LEFT JOIN r5catalogue_apm_eu
            ON cat_part     = l.orl_part
           AND cat_supplier = l.orl_supplier
     AND l.orl_part IN (SELECT sto_part FROM target_parts)
 ),
 lead_time AS (
   SELECT site, part_ordered, region,
-         CAST(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY supplier_lead_time) AS FLOAT) AS lead_time
+         CAST(PERCENTILE_APPROX(supplier_lead_time, 0.5) AS DOUBLE) AS lead_time
   FROM order_lead_times
   WHERE supplier_lead_time IS NOT NULL
   GROUP BY site, part_ordered, region
@@ -139,21 +139,21 @@ replacements AS (
          region,
          apn AS amzn_part,
          DATE(trl_date) AS replaced_on,
-         CAST(est_total_consumption AS FLOAT) AS qty_replaced
-  FROM andes_bi_ext."ar-performance-n-insights".hw_part_family_site_equipment_consumption
+         CAST(est_total_consumption AS DOUBLE) AS qty_replaced
+  FROM hw_part_family_site_equipment_consumption
   WHERE apn IN (SELECT sto_part FROM target_parts)
-    AND DATE(trl_date) >= DATEADD('day', -365, CURRENT_DATE)
+    AND DATE(trl_date) >= date_add(DAY, -365, CURRENT_DATE)
     AND DATE(trl_date) <= CURRENT_DATE
 ),
 
 consumption AS (
   SELECT site, region, amzn_part AS sto_part,
-    SUM(CASE WHEN replaced_on >= DATEADD('day', -30, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_30d,
-    SUM(CASE WHEN replaced_on >= DATEADD('day', -60, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_60d,
-    SUM(CASE WHEN replaced_on >= DATEADD('day', -90, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_90d,
-    SUM(CASE WHEN replaced_on >= DATEADD('day', -120, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_120d,
-    SUM(CASE WHEN replaced_on >= DATEADD('day', -150, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_150d,
-    SUM(CASE WHEN replaced_on >= DATEADD('day', -180, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_180d,
+    SUM(CASE WHEN replaced_on >= date_add(DAY, -30, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_30d,
+    SUM(CASE WHEN replaced_on >= date_add(DAY, -60, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_60d,
+    SUM(CASE WHEN replaced_on >= date_add(DAY, -90, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_90d,
+    SUM(CASE WHEN replaced_on >= date_add(DAY, -120, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_120d,
+    SUM(CASE WHEN replaced_on >= date_add(DAY, -150, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_150d,
+    SUM(CASE WHEN replaced_on >= date_add(DAY, -180, CURRENT_DATE) THEN COALESCE(qty_replaced,0) ELSE 0 END) AS consumed_180d,
     SUM(COALESCE(qty_replaced,0)) AS consumed_365d
   FROM replacements
   GROUP BY site, region, amzn_part
@@ -164,13 +164,13 @@ site_inv_raw AS (
   SELECT *, RANK() OVER (PARTITION BY sto_part, site, region ORDER BY sto_updated DESC) rnk
   FROM (
     SELECT SPLIT_PART(st.sto_store, '-', 1) AS site, 'NA' AS region, st.sto_part,
-           CAST(st.sto_qty AS FLOAT) AS sto_qty, CAST(st.sto_updated AS TIMESTAMP) AS sto_updated
-    FROM andes_bi_ext."rme-gdl".r5stock_apm_na st
+           CAST(st.sto_qty AS DOUBLE) AS sto_qty, CAST(st.sto_updated AS TIMESTAMP) AS sto_updated
+    FROM r5stock_apm_na st
     WHERE st.sto_part IN (SELECT sto_part FROM target_parts)
     UNION ALL
     SELECT SPLIT_PART(st.sto_store, '-', 1) AS site, 'EU' AS region, st.sto_part,
-           CAST(st.sto_qty AS FLOAT) AS sto_qty, CAST(st.sto_updated AS TIMESTAMP) AS sto_updated
-    FROM andes_bi_ext."rme-gdl".r5stock_apm_eu st
+           CAST(st.sto_qty AS DOUBLE) AS sto_qty, CAST(st.sto_updated AS TIMESTAMP) AS sto_updated
+    FROM r5stock_apm_eu st
     WHERE st.sto_part IN (SELECT sto_part FROM target_parts)
   ) sto
 ),
@@ -190,35 +190,35 @@ received_orders AS (
   SELECT rl.ord_org AS site, l.orl_part AS part_ordered,
          CAST(rl.ord_created AS DATE) AS order_created_date,
          CAST(l.orl_lastsaved AS DATE) AS order_received_date,
-         DATEDIFF('day', CAST(rl.ord_created AS DATE), CAST(l.orl_lastsaved AS DATE)) AS rep_time_days,
-         CAST(l.orl_ordqty AS FLOAT) AS orl_ordqty, 'NA' AS region
-  FROM andes_bi_ext."rme-gdl".r5orderlines_apm_na l
-    INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_na rl
-            ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
+         date_diff(DAY, CAST(rl.ord_created AS DATE), CAST(l.orl_lastsaved AS DATE)) AS rep_time_days,
+         CAST(l.orl_ordqty AS DOUBLE) AS orl_ordqty, 'NA' AS region
+  FROM r5orderlines_apm_na l
+    INNER JOIN r5orders_apm_na rl
+            ON trim(cast(l.orl_order AS STRING)) = trim(cast(rl.ord_code AS STRING))
   WHERE l.orl_part IN (SELECT sto_part FROM target_parts)
     AND ((rl.ord_status = 'AR' AND l.orl_status = 'A')
       OR (rl.ord_status = 'PR' AND l.orl_status = 'A')
       OR (rl.ord_status = 'AR' AND l.orl_status = 'soft'))
-    AND CAST(rl.ord_created AS DATE) >= CURRENT_DATE - INTERVAL '365' DAY
+    AND CAST(rl.ord_created AS DATE) >= DATE('${date}') - INTERVAL '${day}' DAY
   UNION ALL
   SELECT rl.ord_org AS site, l.orl_part AS part_ordered,
          CAST(rl.ord_created AS DATE) AS order_created_date,
          CAST(l.orl_lastsaved AS DATE) AS order_received_date,
-         DATEDIFF('day', CAST(rl.ord_created AS DATE), CAST(l.orl_lastsaved AS DATE)) AS rep_time_days,
-         CAST(l.orl_ordqty AS FLOAT) AS orl_ordqty, 'EU' AS region
-  FROM andes_bi_ext."rme-gdl".r5orderlines_apm_eu l
-    INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_eu rl
-            ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
+         date_diff(DAY, CAST(rl.ord_created AS DATE), CAST(l.orl_lastsaved AS DATE)) AS rep_time_days,
+         CAST(l.orl_ordqty AS DOUBLE) AS orl_ordqty, 'EU' AS region
+  FROM r5orderlines_apm_eu l
+    INNER JOIN r5orders_apm_eu rl
+            ON trim(cast(l.orl_order AS STRING)) = trim(cast(rl.ord_code AS STRING))
   WHERE l.orl_part IN (SELECT sto_part FROM target_parts)
     AND ((rl.ord_status = 'AR' AND l.orl_status = 'A')
       OR (rl.ord_status = 'PR' AND l.orl_status = 'A')
       OR (rl.ord_status = 'AR' AND l.orl_status = 'soft'))
-    AND CAST(rl.ord_created AS DATE) >= CURRENT_DATE - INTERVAL '365' DAY
+    AND CAST(rl.ord_created AS DATE) >= DATE('${date}') - INTERVAL '${day}' DAY
 ),
 order_history AS (
   SELECT site, part_ordered AS sto_part, region,
          COUNT(*) AS order_count,
-         ROUND(AVG(CAST(rep_time_days AS FLOAT)), 2) AS avg_rep_time_days,
+         ROUND(AVG(CAST(rep_time_days AS DOUBLE)), 2) AS avg_rep_time_days,
          MIN(rep_time_days) AS min_rep_time_days,
          MAX(rep_time_days) AS max_rep_time_days,
          MAX(order_received_date) AS last_received_date,
@@ -237,26 +237,26 @@ order_history AS (
 coming_order_data AS (
   SELECT l.orl_part AS part_ordered,
          rl.ord_org AS site,
-         trim(cast(l.orl_order AS varchar)) AS order_number,
-         CAST(l.orl_ordqty AS FLOAT) AS orl_ordqty,
+         trim(cast(l.orl_order AS STRING)) AS order_number,
+         CAST(l.orl_ordqty AS DOUBLE) AS orl_ordqty,
          CAST(rl.ord_created AS DATE) AS ord_created_date,
          'NA' AS region
-  FROM andes_bi_ext."rme-gdl".r5orderlines_apm_na l
-    INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_na rl
-            ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
+  FROM r5orderlines_apm_na l
+    INNER JOIN r5orders_apm_na rl
+            ON trim(cast(l.orl_order AS STRING)) = trim(cast(rl.ord_code AS STRING))
   WHERE l.orl_part IN (SELECT sto_part FROM target_parts)
     AND rl.ord_status = 'A'
     AND l.orl_status = 'A'
   UNION ALL
   SELECT l.orl_part AS part_ordered,
          rl.ord_org AS site,
-         trim(cast(l.orl_order AS varchar)) AS order_number,
-         CAST(l.orl_ordqty AS FLOAT) AS orl_ordqty,
+         trim(cast(l.orl_order AS STRING)) AS order_number,
+         CAST(l.orl_ordqty AS DOUBLE) AS orl_ordqty,
          CAST(rl.ord_created AS DATE) AS ord_created_date,
          'EU' AS region
-  FROM andes_bi_ext."rme-gdl".r5orderlines_apm_eu l
-    INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_eu rl
-            ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
+  FROM r5orderlines_apm_eu l
+    INNER JOIN r5orders_apm_eu rl
+            ON trim(cast(l.orl_order AS STRING)) = trim(cast(rl.ord_code AS STRING))
   WHERE l.orl_part IN (SELECT sto_part FROM target_parts)
     AND rl.ord_status = 'A'
     AND l.orl_status = 'A'
@@ -330,10 +330,11 @@ metrics AS (
     LEFT JOIN order_history oh ON oh.site = s.site AND oh.region = s.region AND oh.sto_part = s.sto_part
     LEFT JOIN coming_order_qty co ON co.site = s.site AND co.region = s.region AND co.sto_part = s.sto_part
     LEFT JOIN nearest_open_order npo ON npo.site = s.site AND npo.region = s.region AND npo.sto_part = s.sto_part
-)
+),
+Final AS (
 SELECT
-  CURRENT_DATE AS snapshot_date,
-  site, region, sto_part AS "Part", amazon_pn, product, part_description, building_type,
+  DATE('${date}') AS snapshot_date,
+  site, region, sto_part AS part, sto_part AS amazon_pn, product, part_description, building_type,
   sto_class, site_oh_qty, min_level, max_level,
   supplier_lead_time, replenishment_time,
 
@@ -379,11 +380,75 @@ SELECT
   GREATEST(0.0, ROUND(COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * (CASE WHEN supplier_lead_time > 0 AND CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END IS NOT NULL THEN (supplier_lead_time - (CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END)) / supplier_lead_time ELSE NULL END), 0.0) + COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * GREATEST(ROUND(LEAST(365.0, GREATEST(0.0, CASE WHEN COALESCE(avg_rep_time_days, 0.0) * COALESCE(rate_150d, 0.0) > 0 AND cycle_length_days_150d > 0 THEN (1.0 - LEAST(1.0, min_level / (avg_rep_time_days * rate_150d))) * avg_rep_time_days * (365.0 / cycle_length_days_150d) ELSE 0.0 END)), 2), ROUND(LEAST(365.0, CASE WHEN cycle_length_days_150d > 0 AND replenishment_demand_150d > 0 THEN (365.0 / cycle_length_days_150d) * ((1.0 - LEAST(1.0, min_level / replenishment_demand_150d)) * replenishment_time) ELSE 0.0 END), 2)) / 365.0, 0.0), 4)) AS overall_score_criticality_150d,
   SUM(GREATEST(0.0, COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * (CASE WHEN supplier_lead_time > 0 AND CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END IS NOT NULL THEN (supplier_lead_time - (CASE WHEN COALESCE(rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0)) > 0 THEN (COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / (rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(last_150d_order, 0.0) > 0 THEN (COALESCE(last_30d_order, 0.0) - last_150d_order) / last_150d_order ELSE 0.0 END, 0.0))) ELSE NULL END)) / supplier_lead_time ELSE NULL END), 0.0))) OVER (PARTITION BY site) AS site_sum_situational_score_criticality_150d,
   GREATEST(0.0, SUM(COALESCE(CASE sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END * GREATEST(ROUND(LEAST(365.0, GREATEST(0.0, CASE WHEN COALESCE(avg_rep_time_days, 0.0) * COALESCE(rate_150d, 0.0) > 0 AND cycle_length_days_150d > 0 THEN (1.0 - LEAST(1.0, min_level / (avg_rep_time_days * rate_150d))) * avg_rep_time_days * (365.0 / cycle_length_days_150d) ELSE 0.0 END)), 2), ROUND(LEAST(365.0, CASE WHEN cycle_length_days_150d > 0 AND replenishment_demand_150d > 0 THEN (365.0 / cycle_length_days_150d) * ((1.0 - LEAST(1.0, min_level / replenishment_demand_150d)) * replenishment_time) ELSE 0.0 END), 2)) / 365.0, 0.0)) OVER (PARTITION BY site)) AS site_sum_structural_risk_combo_criticality_150d,
-  CASE WHEN COALESCE(rate_150d, 0.0) > 0 THEN DATEADD('day', CAST((COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / rate_150d AS INTEGER), CURRENT_DATE) ELSE NULL END AS depletion_date_150d,
-  CASE WHEN COALESCE(rate_150d, 0.0) > 0 AND supplier_lead_time IS NOT NULL THEN DATEADD('day', CAST((COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / rate_150d - supplier_lead_time AS INTEGER), CURRENT_DATE) ELSE NULL END AS projected_order_date_150d,
+  CASE WHEN COALESCE(rate_150d, 0.0) > 0 THEN date_add(DAY, CAST((COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / rate_150d AS INTEGER), CURRENT_DATE) ELSE NULL END AS depletion_date_150d,
+  CASE WHEN COALESCE(rate_150d, 0.0) > 0 AND supplier_lead_time IS NOT NULL THEN date_add(DAY, CAST((COALESCE(back_order_qty, 0.0) + COALESCE(site_oh_qty, 0.0)) / rate_150d - supplier_lead_time AS INTEGER), CURRENT_DATE) ELSE NULL END AS projected_order_date_150d,
 
   COUNT(*) OVER (PARTITION BY site) AS site_total_part_count
 
 FROM metrics
 WHERE COALESCE(consumed_365d, 0) > 0 AND sto_class IN ('01 HIGH', '02 MED', '03 LOW')
 ORDER BY sto_part, structural_risk_combo_criticality_150d DESC NULLS LAST, site
+)
+
+SELECT
+CAST(snapshot_date AS DATE) AS snapshot_date,
+CAST(site AS VARCHAR(10)) AS site,
+CAST(region AS VARCHAR(10)) AS region,
+CAST(part AS VARCHAR(50)) AS part,
+CAST(amazon_pn AS VARCHAR(50)) AS amazon_pn,
+CAST(product AS VARCHAR(50)) AS product,
+CAST(part_description AS VARCHAR(500)) AS part_description,
+CAST(building_type AS VARCHAR(20)) AS building_type,
+CAST(sto_class AS VARCHAR(10)) AS sto_class,
+CAST(site_oh_qty AS INT) AS site_oh_qty,
+CAST(min_level AS INT) AS min_level,
+CAST(max_level AS INT) AS max_level,
+CAST(supplier_lead_time AS INT) AS supplier_lead_time,
+CAST(replenishment_time AS INT) AS replenishment_time,
+CAST(order_count AS INT) AS order_count,
+CAST(avg_rep_time_days AS DECIMAL(10,6)) AS avg_rep_time_days,
+CAST(min_rep_time_days AS INT) AS min_rep_time_days,
+CAST(max_rep_time_days AS INT) AS max_rep_time_days,
+CAST(last_received_date AS DATE) AS last_received_date,
+CAST(last_30d_order AS DECIMAL(10,6)) AS last_30d_order,
+CAST(last_60d_order AS DECIMAL(10,6)) AS last_60d_order,
+CAST(last_90d_order AS DECIMAL(10,6)) AS last_90d_order,
+CAST(last_120d_order AS DECIMAL(10,6)) AS last_120d_order,
+CAST(last_150d_order AS DECIMAL(10,6)) AS last_150d_order,
+CAST(last_180d_order AS DECIMAL(10,6)) AS last_180d_order,
+CAST(last_365d_order AS DECIMAL(10,6)) AS last_365d_order,
+CAST(open_order_count AS INT) AS open_order_count,
+CAST(back_order_qty AS INT) AS back_order_qty,
+CAST(earliest_open_order_date AS DATE) AS earliest_open_order_date,
+CAST(nearest_po_number AS VARCHAR(50)) AS nearest_po_number,
+CAST(order_inaction_flag AS INT) AS order_inaction_flag,
+CAST(trend_ratio AS DECIMAL(10,6)) AS trend_ratio,
+CAST(consumed_150d AS INT) AS consumed_150d,
+CAST(consumption_rate_150d AS DECIMAL(10,6)) AS consumption_rate_150d,
+CAST(replenishment_demand_150d AS DECIMAL(10,6)) AS replenishment_demand_150d,
+CAST(coverage_150d AS DECIMAL(10,6)) AS coverage_150d,
+CAST(stockout_fraction_150d AS DECIMAL(10,6)) AS stockout_fraction_150d,
+CAST(stockout_days_per_cycle_150d AS DECIMAL(10,6)) AS stockout_days_per_cycle_150d,
+CAST(cycle_length_days_150d AS DECIMAL(10,6)) AS cycle_length_days_150d,
+CAST(cycles_per_year_150d AS DECIMAL(10,6)) AS cycles_per_year_150d,
+CAST(stockout_days_yr_min_150d AS DECIMAL(10,6)) AS stockout_days_yr_min_150d,
+CAST(stockout_days_min_rep_150d AS DECIMAL(10,6)) AS stockout_days_min_rep_150d,
+CAST(combined_stockout_days_yr_150d AS DECIMAL(10,6)) AS combined_stockout_days_yr_150d,
+CAST(stockout_days_yr_rep_150d AS DECIMAL(10,6)) AS stockout_days_yr_rep_150d,
+CAST(stockout_days_min_share_150d AS DECIMAL(10,6)) AS stockout_days_min_share_150d,
+CAST(stockout_days_rep_share_150d AS DECIMAL(10,6)) AS stockout_days_rep_share_150d,
+CAST(site_sum_stockout_days_yr_rep_150d AS DECIMAL(10,6)) AS site_sum_stockout_days_yr_rep_150d,
+CAST(site_sum_stockout_days_yr_min_150d AS DECIMAL(10,6)) AS site_sum_stockout_days_yr_min_150d,
+CAST(site_sum_combined_stockout_days_yr_150d AS DECIMAL(10,6)) AS site_sum_combined_stockout_days_yr_150d,
+CAST(structural_risk_combo_criticality_150d AS DECIMAL(10,6)) AS structural_risk_combo_criticality_150d,
+CAST(days_of_supply_150d AS DECIMAL(10,6)) AS days_of_supply_150d,
+CAST(adj_days_of_supply_150d AS DECIMAL(10,6)) AS adj_days_of_supply_150d,
+CAST(situational_score_150d AS DECIMAL(10,6)) AS situational_score_150d,
+CAST(situational_score_criticality_150d AS DECIMAL(10,6)) AS situational_score_criticality_150d,
+CAST(overall_score_criticality_150d AS DECIMAL(10,6)) AS overall_score_criticality_150d,
+CAST(site_sum_situational_score_criticality_150d AS DECIMAL(18,6)) AS site_sum_situational_score_criticality_150d,
+CAST(site_sum_structural_risk_combo_criticality_150d AS DECIMAL(18,6)) AS site_sum_structural_risk_combo_criticality_150d,
+CAST(depletion_date_150d AS DATE) AS depletion_date_150d,
+CAST(projected_order_date_150d AS DATE) AS projected_order_date_150d,
+CAST(site_total_part_count AS INT) AS site_total_part_count
+FROM Final;

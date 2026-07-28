@@ -127,7 +127,7 @@ order_lead_times AS (
 ),
 lead_time AS (
   SELECT site, part_ordered, region,
-         MAX(supplier_lead_time) AS lead_time
+         CAST(APPROX_PERCENTILE(supplier_lead_time, 0.5) AS DOUBLE) AS lead_time
   FROM order_lead_times
   WHERE supplier_lead_time IS NOT NULL
   GROUP BY site, part_ordered, region
@@ -239,6 +239,7 @@ coming_order_data AS (
          rl.ord_org AS site,
          trim(cast(l.orl_order AS varchar)) AS order_number,
          CAST(l.orl_ordqty AS DOUBLE) AS orl_ordqty,
+         CAST(rl.ord_created AS DATE) AS ord_created_date,
          'NA' AS region
   FROM "andes"."rme-gdl.r5orderlines_apm_na" l
     INNER JOIN "andes"."rme-gdl.r5orders_apm_na" rl
@@ -251,6 +252,7 @@ coming_order_data AS (
          rl.ord_org AS site,
          trim(cast(l.orl_order AS varchar)) AS order_number,
          CAST(l.orl_ordqty AS DOUBLE) AS orl_ordqty,
+         CAST(rl.ord_created AS DATE) AS ord_created_date,
          'EU' AS region
   FROM "andes"."rme-gdl.r5orderlines_apm_eu" l
     INNER JOIN "andes"."rme-gdl.r5orders_apm_eu" rl
@@ -262,9 +264,20 @@ coming_order_data AS (
 coming_order_qty AS (
   SELECT part_ordered AS sto_part, site, region,
          COUNT(DISTINCT order_number) AS open_order_count,
-         SUM(orl_ordqty) AS back_order_qty
+         SUM(orl_ordqty) AS back_order_qty,
+         MIN(ord_created_date) AS earliest_open_order_date
   FROM coming_order_data
   GROUP BY part_ordered, site, region
+),
+-- Nearest open PO: most recent open order per (part, site, region)
+nearest_open_order AS (
+  SELECT sto_part, site, region, order_number AS nearest_po_number, ord_created_date AS nearest_po_date
+  FROM (
+    SELECT part_ordered AS sto_part, site, region, order_number, ord_created_date,
+           ROW_NUMBER() OVER (PARTITION BY part_ordered, site, region ORDER BY ord_created_date DESC) AS rn
+    FROM coming_order_data
+  ) ranked
+  WHERE rn = 1
 ),
 
 metrics AS (
@@ -284,6 +297,8 @@ metrics AS (
          -- Coming order columns
          COALESCE(co.open_order_count, 0) AS open_order_count,
          COALESCE(co.back_order_qty, 0.0) AS back_order_qty,
+         co.earliest_open_order_date,
+         npo.nearest_po_number,
          c.consumed_30d / 30.0 AS rate_30d, c.consumed_60d / 60.0 AS rate_60d,
          c.consumed_90d / 90.0 AS rate_90d, c.consumed_120d / 120.0 AS rate_120d,
          c.consumed_150d / 150.0 AS rate_150d, c.consumed_180d / 180.0 AS rate_180d,
@@ -314,6 +329,7 @@ metrics AS (
     LEFT JOIN site_oh_qty soh ON soh.site = s.site AND soh.region = s.region AND soh.sto_part = s.sto_part
     LEFT JOIN order_history oh ON oh.site = s.site AND oh.region = s.region AND oh.sto_part = s.sto_part
     LEFT JOIN coming_order_qty co ON co.site = s.site AND co.region = s.region AND co.sto_part = s.sto_part
+    LEFT JOIN nearest_open_order npo ON npo.site = s.site AND npo.region = s.region AND npo.sto_part = s.sto_part
 )
 SELECT
   CURRENT_DATE AS snapshot_date,
@@ -329,6 +345,7 @@ SELECT
 
   -- Coming orders
   open_order_count, back_order_qty,
+  earliest_open_order_date, nearest_po_number,
 
   -- Order inaction flag
   CASE WHEN COALESCE(site_oh_qty, 0.0) < min_level AND COALESCE(back_order_qty, 0) = 0 THEN 1 ELSE 0 END AS order_inaction_flag,
