@@ -18,15 +18,15 @@
 -- Zero OH %, Below Min No PR %, Order Fill Rate
 -- =============================================================================
 WITH target_part_sites AS (
-  SELECT DISTINCT t.apn AS sto_part, t.product, s.site
+  SELECT DISTINCT t.apn AS sto_part, s.equipment AS product, s.site
   FROM "default"."rspl_target_parts" t
   INNER JOIN (
-    SELECT DISTINCT warehouse_id AS site, 'URL' AS equipment FROM "andes"."am_dps_public.url_machine_daily"
+    SELECT DISTINCT warehouse_id AS site, CASE WHEN warehouse_id IN ('RIC4','BCN4','BOS3','SYR1','BDL4') THEN 'URL-D' ELSE 'URL-C' END AS equipment FROM "andes"."am_dps_public.urlslam_machine_daily"
     UNION ALL
     SELECT DISTINCT site, 'USP' AS equipment FROM "andes"."ar-performance-n-insights.hw_part_family_site_equipment_consumption" WHERE equipment IN ('USP')
     UNION ALL
     SELECT DISTINCT warehouse_id AS site, 'EcoPac' AS equipment FROM "andes"."am_dps_public.ecopac_machine_daily"
-  ) s ON LOWER(t.product) = LOWER(s.equipment)
+  ) s ON (LOWER(t.product) = LOWER(s.equipment) OR (LOWER(t.product) = 'url' AND s.equipment IN ('URL-C','URL-D')))
   WHERE t.apn IS NOT NULL
 ),
 
@@ -45,7 +45,7 @@ stock_high_class AS (
          MAX(min_level) AS min_level,
          MAX(max_level) AS max_level,
          MAX(sto_class) AS sto_class,
-         region
+         MIN(region) AS region
   FROM (
     SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part,
            CAST(sto_qty AS DOUBLE) AS site_oh_qty,
@@ -65,7 +65,7 @@ stock_high_class AS (
     WHERE sto_part IN (SELECT sto_part FROM target_part_sites)
       AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM target_part_sites)
   ) raw
-  GROUP BY site, sto_part, region
+  GROUP BY site, sto_part
 ),
 
 active_reqs AS (
@@ -193,15 +193,15 @@ FROM q1_final;
 -- Open Purchase Requisitions > 1 week old
 -- =============================================================================
 WITH target_part_sites AS (
-  SELECT DISTINCT t.apn AS sto_part, t.product, s.site
+  SELECT DISTINCT t.apn AS sto_part, s.equipment AS product, s.site
   FROM "default"."rspl_target_parts" t
   INNER JOIN (
-    SELECT DISTINCT warehouse_id AS site, 'URL' AS equipment FROM "andes"."am_dps_public.url_machine_daily"
+    SELECT DISTINCT warehouse_id AS site, CASE WHEN warehouse_id IN ('RIC4','BCN4','BOS3','SYR1','BDL4') THEN 'URL-D' ELSE 'URL-C' END AS equipment FROM "andes"."am_dps_public.urlslam_machine_daily"
     UNION ALL
     SELECT DISTINCT site, 'USP' AS equipment FROM "andes"."ar-performance-n-insights.hw_part_family_site_equipment_consumption" WHERE equipment IN ('USP')
     UNION ALL
     SELECT DISTINCT warehouse_id AS site, 'EcoPac' AS equipment FROM "andes"."am_dps_public.ecopac_machine_daily"
-  ) s ON LOWER(t.product) = LOWER(s.equipment)
+  ) s ON (LOWER(t.product) = LOWER(s.equipment) OR (LOWER(t.product) = 'url' AND s.equipment IN ('URL-C','URL-D')))
   WHERE t.apn IS NOT NULL
 ),
 
@@ -220,7 +220,7 @@ stock_high_class AS (
          MAX(min_level) AS min_level,
          MAX(max_level) AS max_level,
          MAX(sto_class) AS sto_class,
-         MAX(region) AS region
+         MIN(region) AS region
   FROM (
     SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part,
            CAST(sto_qty AS DOUBLE) AS site_oh_qty,
@@ -287,15 +287,15 @@ ORDER BY o.days_open DESC, o.site, o.apn;
 -- and Tab 5 (Expected vs Actual failure rate)
 -- =============================================================================
 WITH target_part_sites AS (
-  SELECT DISTINCT t.apn AS sto_part, t.product, s.site
+  SELECT DISTINCT t.apn AS sto_part, s.equipment AS product, s.site
   FROM "default"."rspl_target_parts" t
   INNER JOIN (
-    SELECT DISTINCT warehouse_id AS site, 'URL' AS equipment FROM "andes"."am_dps_public.url_machine_daily"
+    SELECT DISTINCT warehouse_id AS site, CASE WHEN warehouse_id IN ('RIC4','BCN4','BOS3','SYR1','BDL4') THEN 'URL-D' ELSE 'URL-C' END AS equipment FROM "andes"."am_dps_public.urlslam_machine_daily"
     UNION ALL
     SELECT DISTINCT site, 'USP' AS equipment FROM "andes"."ar-performance-n-insights.hw_part_family_site_equipment_consumption" WHERE equipment IN ('USP')
     UNION ALL
     SELECT DISTINCT warehouse_id AS site, 'EcoPac' AS equipment FROM "andes"."am_dps_public.ecopac_machine_daily"
-  ) s ON LOWER(t.product) = LOWER(s.equipment)
+  ) s ON (LOWER(t.product) = LOWER(s.equipment) OR (LOWER(t.product) = 'url' AND s.equipment IN ('URL-C','URL-D')))
   WHERE t.apn IS NOT NULL
 ),
 
@@ -314,7 +314,7 @@ stock_high_class AS (
          MAX(min_level) AS min_level,
          MAX(max_level) AS max_level,
          MAX(sto_class) AS sto_class,
-         region
+         MIN(region) AS region
   FROM (
     SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part,
            CAST(sto_qty AS DOUBLE) AS site_oh_qty,
@@ -334,7 +334,7 @@ stock_high_class AS (
     WHERE sto_part IN (SELECT sto_part FROM target_part_sites)
       AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM target_part_sites)
   ) raw
-  GROUP BY site, sto_part, region
+  GROUP BY site, sto_part
 ),
 
 lead_time AS (
