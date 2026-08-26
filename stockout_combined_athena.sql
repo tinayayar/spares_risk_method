@@ -73,15 +73,33 @@ combined AS (
   SELECT * FROM ar_parts
 ),
 
--- Dedup: if a part+site exists in both AR and MSP, keep MSP
+-- Dedup: if a part+site exists in both AR and MSP, keep AR
 deduped AS (
   SELECT *,
-         ROW_NUMBER() OVER (PARTITION BY site, part ORDER BY CASE source WHEN 'MSP' THEN 1 ELSE 2 END) AS dedup_rn
+         ROW_NUMBER() OVER (PARTITION BY site, part ORDER BY CASE source WHEN 'AR' THEN 1 ELSE 2 END) AS dedup_rn
   FROM combined
+),
+
+-- Total distinct APNs in r5stock by site
+r5stock_site_counts AS (
+  SELECT site, COUNT(DISTINCT sto_part) AS site_r5stock_total_apn
+  FROM (
+    SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part
+    FROM "andes"."rme-gdl.r5stock_apm_na"
+    UNION ALL
+    SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part
+    FROM "andes"."rme-gdl.r5stock_apm_eu"
+  ) all_stock
+  GROUP BY site
 )
 
 SELECT
   c.*,
+  -- Facility attributes
+  fac.region AS ar_region,
+  fac.subregion,
+  fac.type,
+  fac.subtype,
   -- Recalculated site-level aggregations across all parts (AR + MSP combined)
   COUNT(*) OVER (PARTITION BY c.site) AS site_total_part_count,
   SUM(COALESCE(c.combined_stockout_days_yr_150d, 0.0)) OVER (PARTITION BY c.site) AS site_sum_combined_stockout_days_yr_150d,
@@ -97,21 +115,9 @@ SELECT
   SUM(CASE WHEN COALESCE(c.back_order_qty, 0) > 0 AND (COALESCE(c.back_order_qty, 0) + COALESCE(c.site_oh_qty, 0)) < COALESCE(c.min_level, 0) THEN 1 ELSE 0 END) OVER (PARTITION BY c.site) AS site_count_parts_backorder_below_min,
   SUM(CASE WHEN COALESCE(c.site_oh_qty, 0) > COALESCE(c.min_level, 0) AND c.depletion_date_150d <= CURRENT_DATE THEN 1 ELSE 0 END) OVER (PARTITION BY c.site) AS site_count_parts_above_min_depleting,
   SUM(CASE WHEN COALESCE(c.site_oh_qty, 0) > COALESCE(c.min_level, 0) AND COALESCE(c.consumption_rate_150d, 0) > 0 AND (c.min_level / NULLIF(c.consumption_rate_150d, 0)) > COALESCE(c.supplier_lead_time, 0) THEN 1 ELSE 0 END) OVER (PARTITION BY c.site) AS site_count_parts_above_min_underset,
-  -- Site + Product level aggregations
-  COUNT(*) OVER (PARTITION BY c.site, c.product) AS site_prod_total_part_count,
-  SUM(COALESCE(c.combined_stockout_days_yr_150d, 0.0)) OVER (PARTITION BY c.site, c.product) AS site_prod_sum_combined_stockout_days_yr_150d,
-  SUM(COALESCE(c.stockout_days_yr_min_150d, 0.0)) OVER (PARTITION BY c.site, c.product) AS site_prod_sum_stockout_days_yr_min_150d,
-  SUM(COALESCE(c.stockout_days_yr_rep_150d, 0.0)) OVER (PARTITION BY c.site, c.product) AS site_prod_sum_stockout_days_yr_rep_150d,
-  SUM(COALESCE(c.stockout_days_min_rep_150d, 0.0)) OVER (PARTITION BY c.site, c.product) AS site_prod_sum_stockout_days_min_rep_150d,
-  SUM(COALESCE(c.structural_risk_combo_criticality_150d, 0.0)) OVER (PARTITION BY c.site, c.product) AS site_prod_sum_structural_risk_combo_criticality_150d,
-  SUM(COALESCE(c.situational_score_criticality_150d, 0.0)) OVER (PARTITION BY c.site, c.product) AS site_prod_sum_situational_score_criticality_150d,
-  SUM(CASE WHEN c.stockout_days_min_share_150d > 0 THEN 1 ELSE 0 END) OVER (PARTITION BY c.site, c.product) AS site_prod_count_parts_min_share_gt0,
-  SUM(CASE WHEN c.stockout_days_rep_share_150d > 0 THEN 1 ELSE 0 END) OVER (PARTITION BY c.site, c.product) AS site_prod_count_parts_rep_share_gt0,
-  SUM(CASE WHEN c.site_oh_qty = 0 THEN 1 ELSE 0 END) OVER (PARTITION BY c.site, c.product) AS site_prod_count_parts_zero_oh,
-  SUM(CASE WHEN c.order_inaction_flag = 1 THEN 1 ELSE 0 END) OVER (PARTITION BY c.site, c.product) AS site_prod_count_parts_order_inaction,
-  SUM(CASE WHEN COALESCE(c.back_order_qty, 0) > 0 AND (COALESCE(c.back_order_qty, 0) + COALESCE(c.site_oh_qty, 0)) < COALESCE(c.min_level, 0) THEN 1 ELSE 0 END) OVER (PARTITION BY c.site, c.product) AS site_prod_count_parts_backorder_below_min,
-  SUM(CASE WHEN COALESCE(c.site_oh_qty, 0) > COALESCE(c.min_level, 0) AND c.depletion_date_150d <= CURRENT_DATE THEN 1 ELSE 0 END) OVER (PARTITION BY c.site, c.product) AS site_prod_count_parts_above_min_depleting,
-  SUM(CASE WHEN COALESCE(c.site_oh_qty, 0) > COALESCE(c.min_level, 0) AND COALESCE(c.consumption_rate_150d, 0) > 0 AND (c.min_level / NULLIF(c.consumption_rate_150d, 0)) > COALESCE(c.supplier_lead_time, 0) THEN 1 ELSE 0 END) OVER (PARTITION BY c.site, c.product) AS site_prod_count_parts_above_min_underset
+  rsc.site_r5stock_total_apn
 FROM deduped c
+  LEFT JOIN "andes"."ar-performance-n-insights.rts_rcc_facilities" fac ON fac.code = c.site
+  LEFT JOIN r5stock_site_counts rsc ON rsc.site = c.site
 WHERE c.dedup_rn = 1
 ORDER BY c.site, c.source, c.combined_stockout_days_yr_150d DESC NULLS LAST
