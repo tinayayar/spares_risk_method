@@ -97,6 +97,10 @@ SELECT
     THEN 1 ELSE 0
   END AS is_rspl_part,
 
+  -- min_max_review: 1 when the MIN setting alone produces projected annual
+  -- stockout days (stockout_days_yr_min_150d > 0), else 0. Sourced from L2.
+  CASE WHEN COALESCE(l2.stockout_days_yr_min_150d, 0) > 0 THEN 1 ELSE 0 END AS min_max_review,
+
   -- Layer 1 (APM setup) columns
   l1.product_rev,
   l1.mpn,
