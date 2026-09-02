@@ -80,7 +80,6 @@ layer2 AS (
 )
 
 SELECT
-  -- Unified join keys (present regardless of which side matched)
   -- Unified join keys (present regardless of which side matched).
   -- Named all_site / all_apn so they do not collide with the site / part
   -- columns that l2.* re-emits below.
@@ -99,8 +98,23 @@ SELECT
 
   -- min_max_review: 1 when the MIN setting alone produces projected annual
   -- stockout days (stockout_days_yr_min_150d > 0), else 0. Sourced from L2.
-  CASE WHEN COALESCE(l2.stockout_days_yr_min_150d, 0) > 0 THEN 1 ELSE 0 END AS min_max_review,
+  -- Min/Max review: 1 if the model attributes any annual stockout days to the
+  -- MIN setting, else 0. If there is no Layer 2 match for the part, the result
+  -- is NULL (not 0) -- l2.part IS NULL means the part exists only in Layer 1.
+ /* CASE
+    WHEN l2.part IS NULL THEN NULL
+    WHEN COALESCE(l2.stockout_days_yr_min_150d, 0) > 0 THEN 1
+    ELSE 0
+  END AS min_max_review,
 
+  -- Lead time review: 1 if the model attributes any annual stockout days to
+  -- replenishment (lead) time, else 0. NULL when there is no Layer 2 match.
+  CASE
+    WHEN l2.part IS NULL THEN NULL
+    WHEN COALESCE(l2.stockout_days_yr_rep_150d, 0) > 0 THEN 1
+    ELSE 0
+  END AS lead_time_review,
+*/
   -- Layer 1 (APM setup) columns
   l1.product_rev,
   l1.mpn,
