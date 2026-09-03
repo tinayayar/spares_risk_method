@@ -51,7 +51,12 @@ layer1 AS (
     SELECT
       site,
       product,
-      rspl_rev,
+      -- rspl_rev of 'N/A' means "no revision"; treat it as blank so it does
+      -- not appear literally (e.g. "URL N/A") in product_rev.
+      CASE
+        WHEN UPPER(TRIM(CAST(rspl_rev AS VARCHAR))) IN ('N/A', 'NA', '') THEN ''
+        ELSE rspl_rev
+      END AS rspl_rev,
       mpn,
       catalogue_reference,
       CASE

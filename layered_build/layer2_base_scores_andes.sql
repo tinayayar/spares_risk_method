@@ -2,16 +2,14 @@
 -- Layer 2: Base data + score calculations for all target parts
 -- ANDES/SDL version of layer2_base_scores.sql -- uses bare (unqualified)
 -- table names for Andes onboarding instead of "andes"."schema.table".
--- target_parts = hw_raw_consumption_daily APNs UNION Layer 1 RSPL APNs
+-- target_parts = hw_raw_consumption_daily (site, APN) pairs
 -- Consumption source: hw_raw_consumption_daily
 -- Order history: DWEEB (AR) + r5orderlines (non-AR)
--- Depends on: Layer 1 table (rspl_apn_site_mapping)
 --
 -- Onboarded input datasets (assumed bare names -> original andes source):
 --   hw_raw_consumption_daily            <- andes."ar-performance-n-insights.hw_raw_consumption_daily"
 --   hw_critical_spares_coupa_leadtime   <- andes."ar-performance-n-insights.hw_critical_spares_coupa_leadtime"
 --   rts_rcc_facilities                  <- andes."ar-performance-n-insights.rts_rcc_facilities"
---   rspl_apn_site_mapping (Layer 1)     <- andes."ar-performance-n-insights.rspl_apn_site_mapping"  (commented out)
 --   ardl_common_prodna__warehouses_enhanced_lookup <- andes."ardatalake.ardl_common_prodna__warehouses_enhanced_lookup"
 --   ardl_common_prodeu__warehouses_enhanced_lookup <- andes."ardatalake.ardl_common_prodeu__warehouses_enhanced_lookup"
 --   r5catalogue_apm_na / r5catalogue_apm_eu        <- andes."rme-gdl.r5catalogue_apm_*"
@@ -22,15 +20,15 @@
 --   dweeb_coming_order                  <- andes."skydatacatalog.dweeb-coming-order"  (hyphens -> underscores for a valid identifier)
 
 WITH
--- Target parts: hw_raw_consumption APNs + RSPL APNs from Layer 1
+-- Target parts: (site, APN) pairs from hw_raw_consumption.
+-- Site-level grain: a part is only eligible at the specific site where it was
+-- consumed. A part consumed at one site does NOT surface at other sites that
+-- merely stock it.
 target_parts AS (
-  SELECT DISTINCT amazon_apn AS sto_part
+  SELECT DISTINCT organization AS site, amazon_apn AS sto_part
   FROM hw_raw_consumption_daily
   WHERE amazon_apn IS NOT NULL
-  -- UNCOMMENT below once Layer 1 table is built:
-  -- UNION
-  -- SELECT DISTINCT apn AS sto_part
-  -- FROM rspl_apn_site_mapping
+    AND organization IS NOT NULL
 ),
 
 -- Site building type lookup
@@ -84,7 +82,8 @@ stock AS (
              MAX(CAST(st.sto_maxqty AS DOUBLE)) AS max_level,
              MAX(st.sto_class) AS sto_class, 'NA' AS region
       FROM r5stock_apm_na st
-      WHERE st.sto_part IN (SELECT sto_part FROM target_parts)
+      WHERE (SPLIT_PART(st.sto_store, '-', 1), st.sto_part)
+            IN (SELECT site, sto_part FROM target_parts)
       GROUP BY SPLIT_PART(st.sto_store, '-', 1), st.sto_part
       UNION ALL
       SELECT SPLIT_PART(st.sto_store, '-', 1) AS site, st.sto_part,
@@ -92,7 +91,8 @@ stock AS (
              MAX(CAST(st.sto_maxqty AS DOUBLE)) AS max_level,
              MAX(st.sto_class) AS sto_class, 'EU' AS region
       FROM r5stock_apm_eu st
-      WHERE st.sto_part IN (SELECT sto_part FROM target_parts)
+      WHERE (SPLIT_PART(st.sto_store, '-', 1), st.sto_part)
+            IN (SELECT site, sto_part FROM target_parts)
       GROUP BY SPLIT_PART(st.sto_store, '-', 1), st.sto_part
     ) sto_raw
   ) ranked
@@ -187,7 +187,7 @@ consumption AS (
     SUM(CASE WHEN DATE(trl_date) >= date_add(DAY, -180, CURRENT_DATE) THEN CAST(qty_consumed AS DOUBLE) ELSE 0 END) AS consumed_180d,
     SUM(CAST(qty_consumed AS DOUBLE)) AS consumed_365d
   FROM hw_raw_consumption_daily
-  WHERE amazon_apn IN (SELECT sto_part FROM target_parts)
+  WHERE (organization, amazon_apn) IN (SELECT site, sto_part FROM target_parts)
     AND DATE(trl_date) >= date_add(DAY, -365, CURRENT_DATE)
     AND DATE(trl_date) <= CURRENT_DATE
   GROUP BY organization, amazon_apn
