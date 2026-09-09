@@ -1,45 +1,24 @@
 -- =============================================================================
 -- flash_report_all_queries.sql
--- All datasource queries for the Critical Spares Flash Report
--- Run each query separately in Athena to produce its CSV output.
--- Base CTEs (target_part_sites, part_desc, stock_high_class) are identical
--- across all queries.
+-- Single consolidated query for the RSPL Flash Report (USP + URL Rev C + URL Rev D)
 --
--- Output mapping:
---   Query 1 → tab1_2_6_datasource.csv  (Zero OH, Below Min No PR, Order Fill)
---   Query 2 → tab3_datasource.csv      (Open PRs > 1 week)
---   Query 3 → tab4_5_datasource.csv    (Replacement rates + Expected vs Actual)
---   tab7_datasource.csv is from external RSC export (not generated here)
+-- PREREQUISITE: Run query_mapping_datasource.sql first.
+-- Save output to S3 and create table:
+--   "default"."rspl_apn_mapping"
+--   Columns: apn, site, stock_mpn, mpn_path_source, catalogue_path_source,
+--            rspl_mpn, rspl_catref, product, mapping_status
+--
+-- This query joins the mapping with stock, PR, and order data to produce
+-- a single CSV (flash_report_datasource.csv) that feeds the HTML generator.
 -- =============================================================================
 
-
--- =============================================================================
--- QUERY 1: tab1_2_6_datasource.csv
--- Zero OH %, Below Min No PR %, Order Fill Rate
--- =============================================================================
-WITH target_part_sites AS (
-  SELECT DISTINCT t.apn AS sto_part, s.equipment AS product, s.site
-  FROM "default"."rspl_target_parts" t
-  INNER JOIN (
-    SELECT DISTINCT warehouse_id AS site, CASE WHEN warehouse_id IN ('RIC4','BCN4','BOS3','SYR1','BDL4') THEN 'URL-D' ELSE 'URL-C' END AS equipment FROM "andes"."am_dps_public.urlslam_machine_daily"
-    UNION ALL
-    SELECT DISTINCT site, 'USP' AS equipment FROM "andes"."ar-performance-n-insights.hw_part_family_site_equipment_consumption" WHERE equipment IN ('USP')
-    UNION ALL
-    SELECT DISTINCT warehouse_id AS site, 'EcoPac' AS equipment FROM "andes"."am_dps_public.ecopac_machine_daily"
-  ) s ON (LOWER(t.product) = LOWER(s.equipment) OR (LOWER(t.product) = 'url' AND s.equipment IN ('URL-C','URL-D')))
-  WHERE t.apn IS NOT NULL
+WITH mapping AS (
+  SELECT DISTINCT apn, site, stock_mpn, rspl_mpn, rspl_catref, product, mapping_status, match_confidence
+  FROM "default"."rspl_apn_mapping"
 ),
 
-part_desc AS (
-  SELECT cat_part, MAX(cat_desc) AS part_description
-  FROM (
-    SELECT cat_part, cat_desc FROM "andes"."rme-gdl.r5catalogue_apm_na" WHERE cat_desc IS NOT NULL
-    UNION ALL
-    SELECT cat_part, cat_desc FROM "andes"."rme-gdl.r5catalogue_apm_eu" WHERE cat_desc IS NOT NULL
-  ) c GROUP BY cat_part
-),
-
-stock_high_class AS (
+-- Stock data for matched APNs
+stock_data AS (
   SELECT site, sto_part,
          MAX(site_oh_qty) AS site_oh_qty,
          MAX(min_level) AS min_level,
@@ -53,8 +32,8 @@ stock_high_class AS (
            CAST(sto_maxqty AS DOUBLE) AS max_level,
            sto_class, 'NA' AS region
     FROM "andes"."rme-gdl.r5stock_apm_na"
-    WHERE sto_part IN (SELECT sto_part FROM target_part_sites)
-      AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM target_part_sites)
+    WHERE sto_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
+      AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM mapping)
     UNION ALL
     SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part,
            CAST(sto_qty AS DOUBLE) AS site_oh_qty,
@@ -62,28 +41,51 @@ stock_high_class AS (
            CAST(sto_maxqty AS DOUBLE) AS max_level,
            sto_class, 'EU' AS region
     FROM "andes"."rme-gdl.r5stock_apm_eu"
-    WHERE sto_part IN (SELECT sto_part FROM target_part_sites)
-      AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM target_part_sites)
+    WHERE sto_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
+      AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM mapping)
   ) raw
   GROUP BY site, sto_part
 ),
 
+-- Active purchase requisitions
 active_reqs AS (
-  SELECT rl.rql_part AS part, rh.req_org AS site
+  SELECT rl.rql_part AS part, rh.req_org AS site,
+         trim(cast(rl.rql_req AS varchar)) AS req_number,
+         CAST(rl.rql_qty AS DOUBLE) AS req_qty,
+         CAST(rh.req_date AS DATE) AS req_date,
+         date_diff('day', CAST(rh.req_date AS DATE), CURRENT_DATE) AS days_open
   FROM "andes"."rme-gdl.r5requislines_apm_na" rl
     INNER JOIN "andes"."rme-gdl.r5requisitions_apm_na" rh
       ON trim(cast(rl.rql_req AS varchar)) = trim(cast(rh.req_code AS varchar))
-  WHERE rl.rql_part IN (SELECT sto_part FROM target_part_sites)
+  WHERE rl.rql_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
     AND rh.req_status = 'A' AND rl.rql_status = 'A'
-  UNION
-  SELECT rl.rql_part AS part, rh.req_org AS site
+  UNION ALL
+  SELECT rl.rql_part AS part, rh.req_org AS site,
+         trim(cast(rl.rql_req AS varchar)) AS req_number,
+         CAST(rl.rql_qty AS DOUBLE) AS req_qty,
+         CAST(rh.req_date AS DATE) AS req_date,
+         date_diff('day', CAST(rh.req_date AS DATE), CURRENT_DATE) AS days_open
   FROM "andes"."rme-gdl.r5requislines_apm_eu" rl
     INNER JOIN "andes"."rme-gdl.r5requisitions_apm_eu" rh
       ON trim(cast(rl.rql_req AS varchar)) = trim(cast(rh.req_code AS varchar))
-  WHERE rl.rql_part IN (SELECT sto_part FROM target_part_sites)
+  WHERE rl.rql_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
     AND rh.req_status = 'A' AND rl.rql_status = 'A'
 ),
 
+-- Keep only most recent PR per site+apn
+active_reqs_ranked AS (
+  SELECT part, site, req_number, req_qty, req_date, days_open,
+         ROW_NUMBER() OVER (PARTITION BY site, part ORDER BY req_date DESC) AS rn
+  FROM active_reqs
+),
+
+active_reqs_latest AS (
+  SELECT part, site, req_number, req_qty, req_date, days_open
+  FROM active_reqs_ranked
+  WHERE rn = 1
+),
+
+-- Order fill data
 order_fill AS (
   SELECT site, apn,
          SUM(qty_ordered) AS total_ordered,
@@ -96,8 +98,8 @@ order_fill AS (
     FROM "andes"."rme-gdl.r5orderlines_apm_na" l
       INNER JOIN "andes"."rme-gdl.r5orders_apm_na" rl
         ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
-    WHERE l.orl_part IN (SELECT sto_part FROM target_part_sites)
-      AND rl.ord_org IN (SELECT site FROM target_part_sites)
+    WHERE l.orl_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
+      AND rl.ord_org IN (SELECT site FROM mapping)
     UNION ALL
     SELECT rl.ord_org AS site, l.orl_part AS apn,
            CAST(l.orl_ordqty AS DOUBLE) AS qty_ordered,
@@ -105,326 +107,142 @@ order_fill AS (
     FROM "andes"."rme-gdl.r5orderlines_apm_eu" l
       INNER JOIN "andes"."rme-gdl.r5orders_apm_eu" rl
         ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
-    WHERE l.orl_part IN (SELECT sto_part FROM target_part_sites)
-      AND rl.ord_org IN (SELECT site FROM target_part_sites)
+    WHERE l.orl_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
+      AND rl.ord_org IN (SELECT site FROM mapping)
   ) orders
   GROUP BY site, apn
 ),
 
-q1_final AS (
+-- Part descriptions
+-- All catalogue description rows (NA + EU), keyed by both cat_part and cat_ref.
+cat_desc_rows AS (
+  SELECT cat_part, cat_ref, cat_desc FROM "andes"."rme-gdl.r5catalogue_apm_na" WHERE cat_desc IS NOT NULL
+  UNION ALL
+  SELECT cat_part, cat_ref, cat_desc FROM "andes"."rme-gdl.r5catalogue_apm_eu" WHERE cat_desc IS NOT NULL
+),
+
+-- Description keyed by the SPECIFIC catalogue reference that matched the part.
+-- This is the honest description for that (cat_ref, apn) pair. It replaces the
+-- old MAX(cat_desc)-across-all-cat_refs logic, which returned the alphabetically
+-- largest string over every cat_ref an APN appears under and so surfaced junk
+-- one-off rows (e.g. "TIMING BELT" on an APN that is really a 15A fuse).
+desc_by_catref AS (
+  SELECT cat_ref, cat_part, MAX(cat_desc) AS part_description
+  FROM cat_desc_rows
+  GROUP BY cat_ref, cat_part
+),
+
+-- Fallback: most common (mode) description per APN. Used when the RSPL part has
+-- no catalog_reference, or no description exists under that cat_ref. Mode is
+-- robust to the occasional corrupt/mislabeled catalogue row.
+desc_mode AS (
+  SELECT cat_part, cat_desc AS part_description
+  FROM (
+    SELECT cat_part, cat_desc,
+           ROW_NUMBER() OVER (PARTITION BY cat_part ORDER BY COUNT(*) DESC, cat_desc) AS rn
+    FROM cat_desc_rows
+    GROUP BY cat_part, cat_desc
+  ) t
+  WHERE rn = 1
+),
+
+-- Site launch dates
+site_launch AS (
+  SELECT code AS site, launch_date
+  FROM "andes"."ar-performance-n-insights.rts_rcc_facilities"
+),
+
+-- Open Purchase Orders (ord_status IN ('A','PR') AND orl_status = 'A')
+open_pos AS (
+  SELECT rl.ord_org AS site, l.orl_part AS apn,
+         trim(cast(l.orl_order AS varchar)) AS po_number,
+         CAST(l.orl_ordqty AS DOUBLE) AS po_qty_ordered,
+         CAST(l.orl_recvqty AS DOUBLE) AS po_qty_received,
+         CAST(l.orl_ordqty AS DOUBLE) - CAST(l.orl_recvqty AS DOUBLE) AS po_qty_outstanding,
+         CAST(rl.ord_date AS DATE) AS po_date
+  FROM "andes"."rme-gdl.r5orderlines_apm_na" l
+    INNER JOIN "andes"."rme-gdl.r5orders_apm_na" rl
+      ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
+  WHERE l.orl_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
+    AND rl.ord_org IN (SELECT site FROM mapping)
+    AND rl.ord_status IN ('A', 'PR')
+    AND l.orl_status = 'A'
+  UNION ALL
+  SELECT rl.ord_org AS site, l.orl_part AS apn,
+         trim(cast(l.orl_order AS varchar)) AS po_number,
+         CAST(l.orl_ordqty AS DOUBLE) AS po_qty_ordered,
+         CAST(l.orl_recvqty AS DOUBLE) AS po_qty_received,
+         CAST(l.orl_ordqty AS DOUBLE) - CAST(l.orl_recvqty AS DOUBLE) AS po_qty_outstanding,
+         CAST(rl.ord_date AS DATE) AS po_date
+  FROM "andes"."rme-gdl.r5orderlines_apm_eu" l
+    INNER JOIN "andes"."rme-gdl.r5orders_apm_eu" rl
+      ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
+  WHERE l.orl_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
+    AND rl.ord_org IN (SELECT site FROM mapping)
+    AND rl.ord_status IN ('A', 'PR')
+    AND l.orl_status = 'A'
+),
+
+-- Keep only most recent open PO per site+apn
+open_pos_ranked AS (
+  SELECT site, apn, po_number, po_qty_ordered, po_qty_received, po_qty_outstanding, po_date,
+         ROW_NUMBER() OVER (PARTITION BY site, apn ORDER BY po_date DESC) AS rn
+  FROM open_pos
+),
+
+open_pos_latest AS (
+  SELECT site, apn, po_number, po_qty_ordered, po_qty_received, po_qty_outstanding, po_date
+  FROM open_pos_ranked
+  WHERE rn = 1
+)
+
+-- =============================================================================
+-- FINAL OUTPUT: One row per APN+site (or per MPN+site for "No APN found")
+-- =============================================================================
 SELECT
-  CURRENT_DATE AS snapshot_date,
-  tps.site,
+  m.site,
   s.region,
-  tps.sto_part AS apn,
-  tps.product,
-  d.part_description,
+  m.product,
+  m.rspl_mpn AS mpn,
+  m.rspl_catref AS catalog_reference,
+  m.apn AS r5_apn,
+  COALESCE(dcr.part_description, dmo.part_description) AS part_description,
   s.sto_class,
   s.site_oh_qty,
   s.min_level,
   s.max_level,
-  CASE WHEN COALESCE(s.site_oh_qty, 0) = 0 THEN 1 ELSE 0 END AS is_zero_oh,
-  CASE WHEN COALESCE(s.site_oh_qty, 0) < s.min_level THEN 1 ELSE 0 END AS is_below_min,
-  CASE WHEN COALESCE(s.site_oh_qty, 0) < s.min_level AND ar.part IS NULL THEN 1 ELSE 0 END AS is_below_min_no_pr,
+  -- KPI flags
+  CASE WHEN COALESCE(s.site_oh_qty, 0) = 0 AND m.apn IS NOT NULL THEN 1 ELSE 0 END AS is_zero_oh,
+  CASE WHEN COALESCE(s.site_oh_qty, 0) <= COALESCE(s.min_level, 0) AND s.min_level > 0 THEN 1 ELSE 0 END AS is_below_min,
+  CASE WHEN COALESCE(s.site_oh_qty, 0) <= COALESCE(s.min_level, 0) AND s.min_level > 0 AND ar.part IS NULL THEN 1 ELSE 0 END AS is_below_min_no_pr,
   CASE WHEN ar.part IS NOT NULL THEN 1 ELSE 0 END AS has_active_pr,
-  SUM(CASE WHEN COALESCE(s.site_oh_qty, 0) = 0 THEN 1 ELSE 0 END) OVER (PARTITION BY tps.site, tps.product) AS site_product_zero_oh_count,
-  COUNT(*) OVER (PARTITION BY tps.site, tps.product) AS site_product_total_high,
-  ROUND(100.0 * SUM(CASE WHEN COALESCE(s.site_oh_qty, 0) = 0 THEN 1 ELSE 0 END) OVER (PARTITION BY tps.site, tps.product) / COUNT(*) OVER (PARTITION BY tps.site, tps.product), 2) AS site_product_pct_zero_oh,
-  SUM(CASE WHEN COALESCE(s.site_oh_qty, 0) < s.min_level AND ar.part IS NULL THEN 1 ELSE 0 END) OVER (PARTITION BY tps.site, tps.product) AS site_product_below_min_no_pr_count,
-  ROUND(100.0 * SUM(CASE WHEN COALESCE(s.site_oh_qty, 0) < s.min_level AND ar.part IS NULL THEN 1 ELSE 0 END) OVER (PARTITION BY tps.site, tps.product) / COUNT(*) OVER (PARTITION BY tps.site, tps.product), 2) AS site_product_pct_below_min_no_pr,
-  SUM(CASE WHEN COALESCE(s.site_oh_qty, 0) = 0 THEN 1 ELSE 0 END) OVER (PARTITION BY tps.product) AS network_product_zero_oh_count,
-  COUNT(*) OVER (PARTITION BY tps.product) AS network_product_total_high,
-  ROUND(100.0 * SUM(CASE WHEN COALESCE(s.site_oh_qty, 0) = 0 THEN 1 ELSE 0 END) OVER (PARTITION BY tps.product) / COUNT(*) OVER (PARTITION BY tps.product), 2) AS network_product_pct_zero_oh,
-  SUM(CASE WHEN COALESCE(s.site_oh_qty, 0) < s.min_level AND ar.part IS NULL THEN 1 ELSE 0 END) OVER (PARTITION BY tps.product) AS network_product_below_min_no_pr_count,
-  ROUND(100.0 * SUM(CASE WHEN COALESCE(s.site_oh_qty, 0) < s.min_level AND ar.part IS NULL THEN 1 ELSE 0 END) OVER (PARTITION BY tps.product) / COUNT(*) OVER (PARTITION BY tps.product), 2) AS network_product_pct_below_min_no_pr,
+  -- PR details
+  ar.req_number,
+  ar.req_qty,
+  ar.req_date,
+  ar.days_open,
+  -- Order fill
   COALESCE(of.total_ordered, 0) AS total_ordered,
   COALESCE(of.total_received, 0) AS total_received,
   of.pct_received,
-  ROUND(100.0 * SUM(COALESCE(of.total_received, 0)) OVER (PARTITION BY tps.site, tps.product) / NULLIF(SUM(COALESCE(of.total_ordered, 0)) OVER (PARTITION BY tps.site, tps.product), 0), 2) AS site_product_pct_received,
-  ROUND(100.0 * SUM(COALESCE(of.total_received, 0)) OVER (PARTITION BY tps.product) / NULLIF(SUM(COALESCE(of.total_ordered, 0)) OVER (PARTITION BY tps.product), 0), 2) AS network_product_pct_received,
-  -- Criticality 1 part counts
-  SUM(CASE WHEN s.sto_class = '01 HIGH' THEN 1 ELSE 0 END) OVER (PARTITION BY tps.site, tps.product) AS site_product_total_critical1,
-  SUM(CASE WHEN s.sto_class = '01 HIGH' THEN 1 ELSE 0 END) OVER (PARTITION BY tps.product) AS network_product_total_critical1
-FROM target_part_sites tps
-  LEFT JOIN stock_high_class s ON s.sto_part = tps.sto_part AND s.site = tps.site
-  LEFT JOIN part_desc d ON d.cat_part = tps.sto_part
-  LEFT JOIN active_reqs ar ON ar.part = tps.sto_part AND ar.site = tps.site
-  LEFT JOIN order_fill of ON of.apn = tps.sto_part AND of.site = tps.site
-ORDER BY tps.site, tps.product, tps.sto_part
-)
-
-SELECT
-  CAST(snapshot_date AS TIMESTAMP) AS snapshot_date,
-  CAST(site AS VARCHAR(10)) AS site,
-  CAST(region AS VARCHAR(10)) AS region,
-  CAST(apn AS VARCHAR(50)) AS apn,
-  CAST(product AS VARCHAR(20)) AS product,
-  CAST(part_description AS VARCHAR(500)) AS part_description,
-  CAST(sto_class AS VARCHAR(10)) AS sto_class,
-  CAST(site_oh_qty AS INT) AS site_oh_qty,
-  CAST(min_level AS INT) AS min_level,
-  CAST(max_level AS INT) AS max_level,
-  CAST(is_zero_oh AS INT) AS is_zero_oh,
-  CAST(is_below_min AS INT) AS is_below_min,
-  CAST(is_below_min_no_pr AS INT) AS is_below_min_no_pr,
-  CAST(has_active_pr AS INT) AS has_active_pr,
-  CAST(site_product_zero_oh_count AS INT) AS site_product_zero_oh_count,
-  CAST(site_product_total_high AS INT) AS site_product_total_high,
-  CAST(site_product_pct_zero_oh AS DECIMAL(10,2)) AS site_product_pct_zero_oh,
-  CAST(site_product_below_min_no_pr_count AS INT) AS site_product_below_min_no_pr_count,
-  CAST(site_product_pct_below_min_no_pr AS DECIMAL(10,2)) AS site_product_pct_below_min_no_pr,
-  CAST(network_product_zero_oh_count AS INT) AS network_product_zero_oh_count,
-  CAST(network_product_total_high AS INT) AS network_product_total_high,
-  CAST(network_product_pct_zero_oh AS DECIMAL(10,2)) AS network_product_pct_zero_oh,
-  CAST(network_product_below_min_no_pr_count AS INT) AS network_product_below_min_no_pr_count,
-  CAST(network_product_pct_below_min_no_pr AS DECIMAL(10,2)) AS network_product_pct_below_min_no_pr,
-  CAST(total_ordered AS INT) AS total_ordered,
-  CAST(total_received AS INT) AS total_received,
-  CAST(pct_received AS DECIMAL(10,2)) AS pct_received,
-  CAST(site_product_pct_received AS DECIMAL(10,2)) AS site_product_pct_received,
-  CAST(network_product_pct_received AS DECIMAL(10,2)) AS network_product_pct_received,
-  CAST(site_product_total_critical1 AS INT) AS site_product_total_critical1,
-  CAST(network_product_total_critical1 AS INT) AS network_product_total_critical1
-FROM q1_final;
-
-
--- =============================================================================
--- QUERY 2: tab3_datasource.csv
--- Open Purchase Requisitions > 1 week old
--- =============================================================================
-WITH target_part_sites AS (
-  SELECT DISTINCT t.apn AS sto_part, s.equipment AS product, s.site
-  FROM "default"."rspl_target_parts" t
-  INNER JOIN (
-    SELECT DISTINCT warehouse_id AS site, CASE WHEN warehouse_id IN ('RIC4','BCN4','BOS3','SYR1','BDL4') THEN 'URL-D' ELSE 'URL-C' END AS equipment FROM "andes"."am_dps_public.urlslam_machine_daily"
-    UNION ALL
-    SELECT DISTINCT site, 'USP' AS equipment FROM "andes"."ar-performance-n-insights.hw_part_family_site_equipment_consumption" WHERE equipment IN ('USP')
-    UNION ALL
-    SELECT DISTINCT warehouse_id AS site, 'EcoPac' AS equipment FROM "andes"."am_dps_public.ecopac_machine_daily"
-  ) s ON (LOWER(t.product) = LOWER(s.equipment) OR (LOWER(t.product) = 'url' AND s.equipment IN ('URL-C','URL-D')))
-  WHERE t.apn IS NOT NULL
-),
-
-part_desc AS (
-  SELECT cat_part, MAX(cat_desc) AS part_description
-  FROM (
-    SELECT cat_part, cat_desc FROM "andes"."rme-gdl.r5catalogue_apm_na" WHERE cat_desc IS NOT NULL
-    UNION ALL
-    SELECT cat_part, cat_desc FROM "andes"."rme-gdl.r5catalogue_apm_eu" WHERE cat_desc IS NOT NULL
-  ) c GROUP BY cat_part
-),
-
-stock_high_class AS (
-  SELECT site, sto_part,
-         MAX(site_oh_qty) AS site_oh_qty,
-         MAX(min_level) AS min_level,
-         MAX(max_level) AS max_level,
-         MAX(sto_class) AS sto_class,
-         MIN(region) AS region
-  FROM (
-    SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part,
-           CAST(sto_qty AS DOUBLE) AS site_oh_qty,
-           CAST(sto_minlev AS DOUBLE) AS min_level,
-           CAST(sto_maxqty AS DOUBLE) AS max_level,
-           sto_class, 'NA' AS region
-    FROM "andes"."rme-gdl.r5stock_apm_na"
-    WHERE sto_part IN (SELECT sto_part FROM target_part_sites)
-      AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM target_part_sites)
-    UNION ALL
-    SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part,
-           CAST(sto_qty AS DOUBLE) AS site_oh_qty,
-           CAST(sto_minlev AS DOUBLE) AS min_level,
-           CAST(sto_maxqty AS DOUBLE) AS max_level,
-           sto_class, 'EU' AS region
-    FROM "andes"."rme-gdl.r5stock_apm_eu"
-    WHERE sto_part IN (SELECT sto_part FROM target_part_sites)
-      AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM target_part_sites)
-  ) raw
-  GROUP BY site, sto_part
-),
-
-open_reqs_ranked AS (
-  SELECT rl.rql_part AS apn, rh.req_org AS site,
-         trim(cast(rl.rql_req AS varchar)) AS req_number, CAST(rl.rql_qty AS DOUBLE) AS req_qty,
-         CAST(rh.req_date AS DATE) AS req_date,
-         date_diff('day', CAST(rh.req_date AS DATE), CURRENT_DATE) AS days_open, 'NA' AS region,
-         ROW_NUMBER() OVER (PARTITION BY rh.req_org, rl.rql_part ORDER BY rh.req_date DESC) AS rn
-  FROM "andes"."rme-gdl.r5requislines_apm_na" rl
-    INNER JOIN "andes"."rme-gdl.r5requisitions_apm_na" rh
-      ON trim(cast(rl.rql_req AS varchar)) = trim(cast(rh.req_code AS varchar))
-  WHERE rl.rql_part IN (SELECT sto_part FROM target_part_sites)
-    AND rh.req_org IN (SELECT site FROM target_part_sites)
-    AND rh.req_status = 'A' AND rl.rql_status = 'A'
-  UNION ALL
-  SELECT rl.rql_part AS apn, rh.req_org AS site,
-         trim(cast(rl.rql_req AS varchar)) AS req_number, CAST(rl.rql_qty AS DOUBLE) AS req_qty,
-         CAST(rh.req_date AS DATE) AS req_date,
-         date_diff('day', CAST(rh.req_date AS DATE), CURRENT_DATE) AS days_open, 'EU' AS region,
-         ROW_NUMBER() OVER (PARTITION BY rh.req_org, rl.rql_part ORDER BY rh.req_date DESC) AS rn
-  FROM "andes"."rme-gdl.r5requislines_apm_eu" rl
-    INNER JOIN "andes"."rme-gdl.r5requisitions_apm_eu" rh
-      ON trim(cast(rl.rql_req AS varchar)) = trim(cast(rh.req_code AS varchar))
-  WHERE rl.rql_part IN (SELECT sto_part FROM target_part_sites)
-    AND rh.req_org IN (SELECT site FROM target_part_sites)
-    AND rh.req_status = 'A' AND rl.rql_status = 'A'
-)
-
-SELECT o.site, o.region, o.apn, tps.product, d.part_description, sc.sto_class,
-       o.req_number, o.req_qty, o.req_date, o.days_open
-FROM open_reqs_ranked o
-  INNER JOIN target_part_sites tps ON tps.sto_part = o.apn AND tps.site = o.site
-  LEFT JOIN part_desc d ON d.cat_part = o.apn
-  LEFT JOIN stock_high_class sc ON sc.sto_part = o.apn AND sc.site = o.site
-WHERE o.rn = 1 AND o.days_open > 7
-ORDER BY o.days_open DESC, o.site, o.apn;
-
-
--- =============================================================================
--- QUERY 3: tab4_5_datasource.csv
--- Combined: Replacement rates (30/60/90/150d) + Expected vs Actual failure rate
--- Starts from target_part_sites (full RSPL denominator)
--- Used by Tab 4 (Top 10 replacement — filter to sto_class = '01 HIGH' in Python)
--- and Tab 5 (Expected vs Actual failure rate)
--- =============================================================================
-WITH target_part_sites AS (
-  SELECT DISTINCT t.apn AS sto_part, s.equipment AS product, s.site
-  FROM "default"."rspl_target_parts" t
-  INNER JOIN (
-    SELECT DISTINCT warehouse_id AS site, CASE WHEN warehouse_id IN ('RIC4','BCN4','BOS3','SYR1','BDL4') THEN 'URL-D' ELSE 'URL-C' END AS equipment FROM "andes"."am_dps_public.urlslam_machine_daily"
-    UNION ALL
-    SELECT DISTINCT site, 'USP' AS equipment FROM "andes"."ar-performance-n-insights.hw_part_family_site_equipment_consumption" WHERE equipment IN ('USP')
-    UNION ALL
-    SELECT DISTINCT warehouse_id AS site, 'EcoPac' AS equipment FROM "andes"."am_dps_public.ecopac_machine_daily"
-  ) s ON (LOWER(t.product) = LOWER(s.equipment) OR (LOWER(t.product) = 'url' AND s.equipment IN ('URL-C','URL-D')))
-  WHERE t.apn IS NOT NULL
-),
-
-part_desc AS (
-  SELECT cat_part, MAX(cat_desc) AS part_description
-  FROM (
-    SELECT cat_part, cat_desc FROM "andes"."rme-gdl.r5catalogue_apm_na" WHERE cat_desc IS NOT NULL
-    UNION ALL
-    SELECT cat_part, cat_desc FROM "andes"."rme-gdl.r5catalogue_apm_eu" WHERE cat_desc IS NOT NULL
-  ) c GROUP BY cat_part
-),
-
-stock_high_class AS (
-  SELECT site, sto_part,
-         MAX(site_oh_qty) AS site_oh_qty,
-         MAX(min_level) AS min_level,
-         MAX(max_level) AS max_level,
-         MAX(sto_class) AS sto_class,
-         MIN(region) AS region
-  FROM (
-    SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part,
-           CAST(sto_qty AS DOUBLE) AS site_oh_qty,
-           CAST(sto_minlev AS DOUBLE) AS min_level,
-           CAST(sto_maxqty AS DOUBLE) AS max_level,
-           sto_class, 'NA' AS region
-    FROM "andes"."rme-gdl.r5stock_apm_na"
-    WHERE sto_part IN (SELECT sto_part FROM target_part_sites)
-      AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM target_part_sites)
-    UNION ALL
-    SELECT SPLIT_PART(sto_store, '-', 1) AS site, sto_part,
-           CAST(sto_qty AS DOUBLE) AS site_oh_qty,
-           CAST(sto_minlev AS DOUBLE) AS min_level,
-           CAST(sto_maxqty AS DOUBLE) AS max_level,
-           sto_class, 'EU' AS region
-    FROM "andes"."rme-gdl.r5stock_apm_eu"
-    WHERE sto_part IN (SELECT sto_part FROM target_part_sites)
-      AND SPLIT_PART(sto_store, '-', 1) IN (SELECT site FROM target_part_sites)
-  ) raw
-  GROUP BY site, sto_part
-),
-
-lead_time AS (
-  SELECT site, part_ordered, region,
-         APPROX_PERCENTILE(supplier_lead_time, 0.5) AS supplier_lead_time
-  FROM (
-    SELECT rl.ord_org AS site, l.orl_part AS part_ordered,
-           CAST(cat_leadtime AS DOUBLE) AS supplier_lead_time, 'NA' AS region
-    FROM "andes"."rme-gdl.r5orderlines_apm_na" l
-      INNER JOIN "andes"."rme-gdl.r5orders_apm_na" rl
-        ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
-      LEFT JOIN "andes"."rme-gdl.r5catalogue_apm_na"
-        ON cat_part = l.orl_part AND cat_supplier = l.orl_supplier
-    WHERE l.orl_part IN (SELECT sto_part FROM target_part_sites)
-    UNION ALL
-    SELECT rl.ord_org AS site, l.orl_part AS part_ordered,
-           CAST(cat_leadtime AS DOUBLE) AS supplier_lead_time, 'EU' AS region
-    FROM "andes"."rme-gdl.r5orderlines_apm_eu" l
-      INNER JOIN "andes"."rme-gdl.r5orders_apm_eu" rl
-        ON trim(cast(l.orl_order AS varchar)) = trim(cast(rl.ord_code AS varchar))
-      LEFT JOIN "andes"."rme-gdl.r5catalogue_apm_eu"
-        ON cat_part = l.orl_part AND cat_supplier = l.orl_supplier
-  ) olt
-  WHERE supplier_lead_time IS NOT NULL
-  GROUP BY site, part_ordered, region
-),
-
-consumption_data AS (
-  SELECT site, apn, DATE(trl_date) AS consumption_date,
-         CAST(est_total_consumption AS DOUBLE) AS qty_consumed
-  FROM "andes"."ar-performance-n-insights.hw_part_family_site_equipment_consumption"
-  WHERE apn IN (SELECT sto_part FROM target_part_sites)
-    AND site IN (SELECT site FROM target_part_sites)
-),
-
-consumption_agg AS (
-  SELECT site, apn,
-    SUM(CASE WHEN consumption_date >= date_add('day', -30, CURRENT_DATE) THEN qty_consumed ELSE 0 END) AS consumed_30d,
-    SUM(CASE WHEN consumption_date >= date_add('day', -60, CURRENT_DATE) THEN qty_consumed ELSE 0 END) AS consumed_60d,
-    SUM(CASE WHEN consumption_date >= date_add('day', -90, CURRENT_DATE) THEN qty_consumed ELSE 0 END) AS consumed_90d,
-    SUM(CASE WHEN consumption_date >= date_add('day', -150, CURRENT_DATE) THEN qty_consumed ELSE 0 END) AS consumed_150d,
-    SUM(CASE WHEN consumption_date >= date_add('day', -180, CURRENT_DATE) THEN qty_consumed ELSE 0 END) AS consumed_180d,
-    SUM(qty_consumed) AS consumed_all,
-    ROUND(SUM(CASE WHEN consumption_date >= date_add('day', -30, CURRENT_DATE) THEN qty_consumed ELSE 0 END) / 30.0, 4) AS rate_30d,
-    ROUND(SUM(CASE WHEN consumption_date >= date_add('day', -60, CURRENT_DATE) THEN qty_consumed ELSE 0 END) / 60.0, 4) AS rate_60d,
-    ROUND(SUM(CASE WHEN consumption_date >= date_add('day', -90, CURRENT_DATE) THEN qty_consumed ELSE 0 END) / 90.0, 4) AS rate_90d,
-    ROUND(SUM(CASE WHEN consumption_date >= date_add('day', -150, CURRENT_DATE) THEN qty_consumed ELSE 0 END) / 150.0, 4) AS rate_150d,
-    ROUND(SUM(CASE WHEN consumption_date >= date_add('day', -180, CURRENT_DATE) THEN qty_consumed ELSE 0 END) / 180.0, 4) AS actual_daily_rate,
-    COUNT(CASE WHEN consumption_date >= date_add('day', -150, CURRENT_DATE) AND qty_consumed > 0 THEN 1 END) AS days_with_consumption_150d
-  FROM consumption_data
-  GROUP BY site, apn
-)
-
-SELECT
-  tps.site,
-  sc.region,
-  tps.sto_part AS apn,
-  tps.product,
-  d.part_description,
-  sc.sto_class,
-  sc.min_level,
-  lt.supplier_lead_time,
-  -- Consumption rates
-  ca.consumed_30d,
-  ca.consumed_60d,
-  ca.consumed_90d,
-  ca.consumed_150d,
-  ca.consumed_180d,
-  ca.consumed_all,
-  ca.rate_30d,
-  ca.rate_60d,
-  ca.rate_90d,
-  ca.rate_150d,
-  ca.actual_daily_rate,
-  ca.days_with_consumption_150d,
-  -- Expected vs Actual
-  ROUND(CASE WHEN COALESCE(lt.supplier_lead_time, 0) > 0 AND COALESCE(sc.min_level, 0) > 0
-    THEN sc.min_level / lt.supplier_lead_time ELSE NULL END, 4) AS expected_daily_rate,
-  ROUND(CASE WHEN COALESCE(sc.min_level, 0) > 0 AND COALESCE(lt.supplier_lead_time, 0) > 0
-    THEN ca.actual_daily_rate / (sc.min_level / lt.supplier_lead_time)
-    ELSE NULL END, 4) AS actual_vs_expected_ratio,
-  -- Flags and pre-computed totals
-  CASE WHEN sc.min_level IS NOT NULL AND lt.supplier_lead_time IS NOT NULL THEN 1 ELSE 0 END AS has_min_and_lt,
-  COUNT(*) OVER (PARTITION BY tps.site, tps.product) AS site_product_total_parts,
-  SUM(CASE WHEN sc.min_level IS NOT NULL AND lt.supplier_lead_time IS NOT NULL THEN 1 ELSE 0 END) OVER (PARTITION BY tps.site, tps.product) AS site_product_parts_with_min_lt,
-  COUNT(*) OVER (PARTITION BY tps.product) AS network_product_total_parts,
-  SUM(CASE WHEN sc.min_level IS NOT NULL AND lt.supplier_lead_time IS NOT NULL THEN 1 ELSE 0 END) OVER (PARTITION BY tps.product) AS network_product_parts_with_min_lt
-FROM target_part_sites tps
-  LEFT JOIN stock_high_class sc ON sc.sto_part = tps.sto_part AND sc.site = tps.site
-  LEFT JOIN part_desc d ON d.cat_part = tps.sto_part
-  LEFT JOIN lead_time lt ON lt.site = tps.site AND lt.part_ordered = tps.sto_part AND lt.region = sc.region
-  LEFT JOIN consumption_agg ca ON ca.site = tps.site AND ca.apn = tps.sto_part
-ORDER BY actual_vs_expected_ratio DESC NULLS LAST, tps.site, tps.sto_part;
+  -- Mapping info
+  m.mapping_status,
+  m.stock_mpn,
+  m.match_confidence,
+  -- Site info
+  sl.launch_date,
+  -- Open PO details
+  op.po_number,
+  op.po_qty_ordered,
+  op.po_qty_received,
+  op.po_qty_outstanding,
+  op.po_date
+FROM mapping m
+  LEFT JOIN stock_data s ON s.sto_part = m.apn AND s.site = m.site
+  LEFT JOIN desc_by_catref dcr ON dcr.cat_part = m.apn AND dcr.cat_ref = m.rspl_catref
+  LEFT JOIN desc_mode dmo ON dmo.cat_part = m.apn
+  LEFT JOIN active_reqs_latest ar ON ar.part = m.apn AND ar.site = m.site
+  LEFT JOIN order_fill of ON of.apn = m.apn AND of.site = m.site
+  LEFT JOIN site_launch sl ON sl.site = m.site
+  LEFT JOIN open_pos_latest op ON op.apn = m.apn AND op.site = m.site
+ORDER BY m.site, m.rspl_mpn, m.apn;
