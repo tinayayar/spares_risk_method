@@ -30,23 +30,39 @@ site_building_type AS (
   ) wh
 ),
 
--- Part description + cat_ref from catalogue (one row per sto_part, cat_refs collapsed)
+-- Product lookup from BADS control-limit thresholds, keyed on cat_ref (arpn).
+-- Deduped to one product per cat_ref so the cat_ref-level join below cannot
+-- fan out rows.
+threshold_product AS (
+  SELECT UPPER(TRIM(arpn)) AS cat_ref, MAX(product) AS product
+  FROM "andes"."bads.hw_component_control_limit_thresholds"
+  WHERE arpn IS NOT NULL AND TRIM(arpn) != '' AND product IS NOT NULL
+  GROUP BY UPPER(TRIM(arpn))
+),
+
+-- Part description + cat_ref from catalogue (one row per sto_part, cat_refs collapsed).
+-- Product is joined at the raw cat_ref level (before collapsing) so each product
+-- stays aligned with its cat_ref, then collapsed into product_list alongside
+-- cat_ref_list.
 part_info AS (
-  SELECT sto_part, part_description, cat_ref_list, region
+  SELECT sto_part, part_description, cat_ref_list, product_list, region
   FROM (
     SELECT cat_part AS sto_part,
            MAX(cat_desc) AS part_description,
            ARRAY_JOIN(ARRAY_AGG(DISTINCT cat_ref), ', ') AS cat_ref_list,
+           ARRAY_JOIN(ARRAY_AGG(DISTINCT product), ', ') AS product_list,
            region,
            ROW_NUMBER() OVER (PARTITION BY cat_part ORDER BY region) AS rn
     FROM (
-      SELECT c.cat_part, c.cat_desc, c.cat_ref, 'NA' AS region
+      SELECT c.cat_part, c.cat_desc, c.cat_ref, tp.product, 'NA' AS region
       FROM "andes"."rme-gdl.r5catalogue_apm_na" c
+        LEFT JOIN threshold_product tp ON tp.cat_ref = UPPER(TRIM(c.cat_ref))
       WHERE c.cat_part IN (SELECT sto_part FROM target_parts)
         AND c.cat_desc IS NOT NULL
       UNION ALL
-      SELECT c.cat_part, c.cat_desc, c.cat_ref, 'EU' AS region
+      SELECT c.cat_part, c.cat_desc, c.cat_ref, tp.product, 'EU' AS region
       FROM "andes"."rme-gdl.r5catalogue_apm_eu" c
+        LEFT JOIN threshold_product tp ON tp.cat_ref = UPPER(TRIM(c.cat_ref))
       WHERE c.cat_part IN (SELECT sto_part FROM target_parts)
         AND c.cat_desc IS NOT NULL
     ) cat_d
@@ -326,7 +342,7 @@ dweeb_co AS (
 metrics AS (
   SELECT s.site, s.region, s.sto_part,
          s.sto_part AS amazon_pn,
-         pi.part_description, pi.cat_ref_list,
+         pi.part_description, pi.cat_ref_list, pi.product_list,
          -- Derive part_number from first cat_ref (for DWEEB join, internal only)
          CASE
            WHEN UPPER(TRIM(SPLIT_PART(pi.cat_ref_list, ',', 1))) LIKE 'R%' OR UPPER(TRIM(SPLIT_PART(pi.cat_ref_list, ',', 1))) LIKE '%-FRU'
@@ -373,7 +389,7 @@ metrics AS (
 
 SELECT
   CURRENT_DATE AS snapshot_date,
-  m.site, m.region, m.sto_part AS part, m.amazon_pn, m.part_description, m.cat_ref_list,
+  m.site, m.region, m.sto_part AS part, m.amazon_pn, m.part_description, m.cat_ref_list, m.product_list,
   m.building_type, m.sto_class, m.site_oh_qty, m.min_level, m.max_level,
   m.supplier_lead_time, m.replenishment_time,
 
@@ -400,7 +416,7 @@ SELECT
   m.nearest_po_number,
 
   -- Order inaction flag
-  CASE WHEN COALESCE(m.site_oh_qty, 0.0) < m.min_level
+  CASE WHEN COALESCE(m.site_oh_qty, 0.0) <= m.min_level
         AND COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0) = 0
        THEN 1 ELSE 0 END AS order_inaction_flag,
 
@@ -453,23 +469,49 @@ SELECT
     THEN (COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) + COALESCE(m.site_oh_qty, 0.0)) / (m.rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(COALESCE(hx.last_150d_order, m.r5_last_150d_order), 0.0) > 0 THEN (COALESCE(COALESCE(hx.last_30d_order, m.r5_last_30d_order), 0.0) - COALESCE(hx.last_150d_order, m.r5_last_150d_order)) / COALESCE(hx.last_150d_order, m.r5_last_150d_order) ELSE 0.0 END, 0.0)))
     ELSE NULL END, 2) AS adj_days_of_supply_150d,
 
-  -- Situational score
-  ROUND(CASE WHEN m.supplier_lead_time > 0 AND COALESCE(m.rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(COALESCE(hx.last_150d_order, m.r5_last_150d_order), 0.0) > 0 THEN (COALESCE(COALESCE(hx.last_30d_order, m.r5_last_30d_order), 0.0) - COALESCE(hx.last_150d_order, m.r5_last_150d_order)) / COALESCE(hx.last_150d_order, m.r5_last_150d_order) ELSE 0.0 END, 0.0)) > 0
-    THEN (m.supplier_lead_time - (COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) + COALESCE(m.site_oh_qty, 0.0)) / (m.rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(COALESCE(hx.last_150d_order, m.r5_last_150d_order), 0.0) > 0 THEN (COALESCE(COALESCE(hx.last_30d_order, m.r5_last_30d_order), 0.0) - COALESCE(hx.last_150d_order, m.r5_last_150d_order)) / COALESCE(hx.last_150d_order, m.r5_last_150d_order) ELSE 0.0 END, 0.0)))) / m.supplier_lead_time
-    ELSE NULL END, 4) AS situational_score_150d,
+  -- Situational score (tiered severity, 0-1 scale):
+  --   1.00  on-hand = 0 AND no PO
+  --   0.75  on-hand = 0 (PO exists)
+  --   0.50  0 < on-hand <= MIN AND no PO
+  --   0.25  0 < on-hand <= MIN (PO exists)
+  --   0.00  on-hand > MIN
+  -- "no PO" = coming/back order qty (DWEEB preferred, r5 fallback) = 0.
+  CASE
+    WHEN COALESCE(m.site_oh_qty, 0.0) = 0
+         AND COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) = 0 THEN 1.00
+    WHEN COALESCE(m.site_oh_qty, 0.0) = 0                                            THEN 0.75
+    WHEN COALESCE(m.site_oh_qty, 0.0) <= m.min_level
+         AND COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) = 0 THEN 0.50
+    WHEN COALESCE(m.site_oh_qty, 0.0) <= m.min_level                                 THEN 0.25
+    ELSE 0.00
+  END AS situational_score_150d,
 
-  -- Situational score criticality
-  GREATEST(0.0, ROUND(CASE m.sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END *
-    CASE WHEN m.supplier_lead_time > 0 AND COALESCE(m.rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(COALESCE(hx.last_150d_order, m.r5_last_150d_order), 0.0) > 0 THEN (COALESCE(COALESCE(hx.last_30d_order, m.r5_last_30d_order), 0.0) - COALESCE(hx.last_150d_order, m.r5_last_150d_order)) / COALESCE(hx.last_150d_order, m.r5_last_150d_order) ELSE 0.0 END, 0.0)) > 0
-      THEN (m.supplier_lead_time - (COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) + COALESCE(m.site_oh_qty, 0.0)) / (m.rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(COALESCE(hx.last_150d_order, m.r5_last_150d_order), 0.0) > 0 THEN (COALESCE(COALESCE(hx.last_30d_order, m.r5_last_30d_order), 0.0) - COALESCE(hx.last_150d_order, m.r5_last_150d_order)) / COALESCE(hx.last_150d_order, m.r5_last_150d_order) ELSE 0.0 END, 0.0)))) / m.supplier_lead_time
-      ELSE NULL END, 4)) AS situational_score_criticality_150d,
+  -- Situational score criticality = sto_class_weight * situational tier
+  ROUND(
+    (CASE m.sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END)
+    * CASE
+        WHEN COALESCE(m.site_oh_qty, 0.0) = 0
+             AND COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) = 0 THEN 1.00
+        WHEN COALESCE(m.site_oh_qty, 0.0) = 0                                            THEN 0.75
+        WHEN COALESCE(m.site_oh_qty, 0.0) <= m.min_level
+             AND COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) = 0 THEN 0.50
+        WHEN COALESCE(m.site_oh_qty, 0.0) <= m.min_level                                 THEN 0.25
+        ELSE 0.00
+      END
+  , 4) AS situational_score_criticality_150d,
 
   -- Overall score criticality = situational + structural
   GREATEST(0.0, ROUND(
-    COALESCE(CASE m.sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END *
-      CASE WHEN m.supplier_lead_time > 0 AND COALESCE(m.rate_150d, 0.0) * (1.0 + COALESCE(CASE WHEN COALESCE(COALESCE(hx.last_150d_order, m.r5_last_150d_order), 0.0) > 0 THEN (COALESCE(COALESCE(hx.last_30d_order, m.r5_last_30d_order), 0.0) - COALESCE(hx.last_150d_order, m.r5_last_150d_order)) / COALESCE(hx.last_150d_order, m.r5_last_150d_order) ELSE 0.0 END, 0.0)) > 0
-        THEN (m.supplier_lead_time - (COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) + COALESCE(m.site_oh_qty, 0.0)) / (m.rate_150d * (1.0 + COALESCE(CASE WHEN COALESCE(COALESCE(hx.last_150d_order, m.r5_last_150d_order), 0.0) > 0 THEN (COALESCE(COALESCE(hx.last_30d_order, m.r5_last_30d_order), 0.0) - COALESCE(hx.last_150d_order, m.r5_last_150d_order)) / COALESCE(hx.last_150d_order, m.r5_last_150d_order) ELSE 0.0 END, 0.0)))) / m.supplier_lead_time
-        ELSE NULL END, 0.0)
+    (CASE m.sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END)
+    * CASE
+        WHEN COALESCE(m.site_oh_qty, 0.0) = 0
+             AND COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) = 0 THEN 1.00
+        WHEN COALESCE(m.site_oh_qty, 0.0) = 0                                            THEN 0.75
+        WHEN COALESCE(m.site_oh_qty, 0.0) <= m.min_level
+             AND COALESCE(COALESCE(dco.co_back_order_qty, m.r5_back_order_qty), 0.0) = 0 THEN 0.50
+        WHEN COALESCE(m.site_oh_qty, 0.0) <= m.min_level                                 THEN 0.25
+        ELSE 0.00
+      END
     + COALESCE(CASE m.sto_class WHEN '01 HIGH' THEN 1.0 WHEN '02 MED' THEN 0.75 WHEN '03 LOW' THEN 0.5 ELSE 0.25 END *
       GREATEST(
         ROUND(LEAST(365.0, GREATEST(0.0, CASE WHEN COALESCE(COALESCE(hx.avg_rep_time_days, m.r5_avg_rep_time_days), 0.0) * COALESCE(m.rate_150d, 0.0) > 0 AND m.cycle_length_days_150d > 0 THEN (1.0 - LEAST(1.0, m.min_level / (COALESCE(hx.avg_rep_time_days, m.r5_avg_rep_time_days) * m.rate_150d))) * COALESCE(hx.avg_rep_time_days, m.r5_avg_rep_time_days) * (365.0 / m.cycle_length_days_150d) ELSE 0.0 END)), 2),
