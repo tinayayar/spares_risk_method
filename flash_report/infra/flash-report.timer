@@ -1,0 +1,10 @@
+[Unit]
+Description=Run flash report daily at 05:00 America/Los_Angeles
+
+[Timer]
+# System timezone is America/Los_Angeles, so 05:00 here == 5 AM Pacific.
+OnCalendar=*-*-* 05:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

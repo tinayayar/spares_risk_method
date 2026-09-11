@@ -1,0 +1,34 @@
+{
+  "CallerReference": "flash-report-2026-dist-v1",
+  "Comment": "Flash report - permanent URL fronting private S3 bucket via OAC",
+  "Enabled": true,
+  "DefaultRootObject": "flash_report.html",
+  "Origins": {
+    "Quantity": 1,
+    "Items": [
+      {
+        "Id": "flash-report-s3-origin",
+        "DomainName": "tinayay-flash-report-2026.s3.us-east-1.amazonaws.com",
+        "OriginAccessControlId": "EJRLYZRY7HKTT",
+        "S3OriginConfig": {
+          "OriginAccessIdentity": ""
+        }
+      }
+    ]
+  },
+  "DefaultCacheBehavior": {
+    "TargetOriginId": "flash-report-s3-origin",
+    "ViewerProtocolPolicy": "redirect-to-https",
+    "Compress": true,
+    "AllowedMethods": {
+      "Quantity": 2,
+      "Items": ["GET", "HEAD"],
+      "CachedMethods": {
+        "Quantity": 2,
+        "Items": ["GET", "HEAD"]
+      }
+    },
+    "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6"
+  },
+  "PriceClass": "PriceClass_100"
+}

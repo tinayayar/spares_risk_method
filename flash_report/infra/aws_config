@@ -1,0 +1,5 @@
+[default]
+region = us-east-1
+role_arn = arn:aws:iam::727615359903:role/AthenaFullAccess-alpha
+credential_source = Ec2InstanceMetadata
+role_session_name = flash-report-runner

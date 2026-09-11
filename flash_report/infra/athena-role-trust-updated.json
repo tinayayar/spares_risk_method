@@ -1,0 +1,41 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "1",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": [
+                    "arn:aws:iam::727615359903:role/service-role/pni-data-freshness-check-role-o16mafqs",
+                    "arn:aws:iam::727615359903:role/autocut-v2-ecs-task-role",
+                    "arn:aws:iam::727615359903:role/AutocutCodeBuildRole",
+                    "arn:aws:iam::727615359903:role/spa-storage-risk-connector-role",
+                    "arn:aws:iam::727615359903:role/RiskScoreAutocut-QueryLambdaRole",
+                    "arn:aws:iam::727615359903:role/IibsAdminAccess-DO-NOT-DELETE",
+                    "arn:aws:iam::727615359903:role/obda-risk-connector-role",
+                    "arn:aws:iam::727615359903:role/rspl-checker-beta-RSPLCheckerFunctionRole-rwNSuf4Ni9kt",
+                    "arn:aws:iam::727615359903:role/AutocutV2LambdaRole",
+                    "arn:aws:iam::727615359903:role/flash-report-runner"
+                ]
+            },
+            "Action": "sts:AssumeRole"
+        },
+        {
+            "Sid": "2",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": [
+                    "arn:aws:iam::048851363556:role/BrokerService-Prod",
+                    "arn:aws:iam::048851363556:user/BrokerService",
+                    "arn:aws:iam::621463273587:role/BrokerService-Prod"
+                ]
+            },
+            "Action": "sts:AssumeRole",
+            "Condition": {
+                "StringEquals": {
+                    "sts:ExternalId": "GetSecurityTokenAdmin"
+                }
+            }
+        }
+    ]
+}

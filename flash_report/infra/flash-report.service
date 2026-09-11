@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily flash report generation and publish
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/flashreport/run_flash_report_ec2.sh
