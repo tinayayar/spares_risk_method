@@ -1,0 +1,8 @@
+type::{
+  base:list,
+  open_elements:true,
+  elements:[
+    { name:site, doc:"Warehouse site code (e.g., ABQ1, BOS3)", type:{ base:string, max_length:20, nullable:false } },
+    { name:product, doc:"Product type (USP, URL Rev C, URL Rev C2, URL Rev D)", type:{ base:string, max_length:50, nullable:true } }
+  ]
+}

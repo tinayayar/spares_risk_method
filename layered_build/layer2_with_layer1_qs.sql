@@ -1,11 +1,11 @@
--- layer2_with_layer1.sql
--- Athena variant of layer2_with_layer1_qs.sql.
--- Uses "andes"."schema.table" references and Athena-compatible syntax.
+-- layer2_with_layer1_qs.sql
+-- QuickSight/Redshift variant of layer2_with_layer1.sql.
+-- Uses andes_bi_ext."schema".table references and Redshift-compatible syntax.
 --
 -- Base : Layer 2 score base (latest snapshot only)
---        "andes"."ar-performance-n-insights.hw_critical_spares_score_base"
+--        andes_bi_ext."ar-performance-n-insights".hw_critical_spares_score_base
 -- Enrich: Layer 1 RSPL / APM setup with corrected site->product mapping
---        "andes"."ar-performance-n-insights.hw_critical_spares_apm_setup_details"
+--        andes_bi_ext."ar-performance-n-insights".hw_critical_spares_apm_setup_details
 --
 -- Join: FULL OUTER JOIN on site + apn. Includes parts present in EITHER source.
 -- Grain: one row per site + product + apn (Layer-2-only parts have product = NULL).
@@ -78,7 +78,7 @@ layer1_corrected AS (
     d.mpn,
     d.catalogue_reference,
     CASE
-      WHEN UPPER(TRIM(CAST(d.apn AS VARCHAR))) IN ('N/A', 'NA', '') THEN NULL
+      WHEN UPPER(TRIM(CAST(d.apn AS VARCHAR(100)))) IN ('N/A', 'NA', '') THEN NULL
       ELSE d.apn
     END AS apn,
     d.sto_prefmanufactpart,
@@ -99,7 +99,7 @@ layer1_corrected AS (
         OR d.multiple_apns       = 1
       THEN 1 ELSE 0
     END AS incorrect_apm_setup
-  FROM "andes"."ar-performance-n-insights.hw_critical_spares_apm_setup_details" d
+  FROM andes_bi_ext."ar-performance-n-insights".hw_critical_spares_apm_setup_details d
     INNER JOIN valid_site_product v
       ON v.site = d.site
      AND v.product = CASE
@@ -192,10 +192,10 @@ site_apm_gap AS (
 -- Layer 2 score base, LATEST snapshot only.
 layer2 AS (
   SELECT *
-  FROM "andes"."ar-performance-n-insights.hw_critical_spares_score_base"
+  FROM andes_bi_ext."ar-performance-n-insights".hw_critical_spares_score_base
   WHERE snapshot_date = (
     SELECT MAX(snapshot_date)
-    FROM "andes"."ar-performance-n-insights.hw_critical_spares_score_base"
+    FROM andes_bi_ext."ar-performance-n-insights".hw_critical_spares_score_base
   )
 ),
 
@@ -213,23 +213,23 @@ l1_stock AS (
                               ORDER BY CASE region WHEN 'NA' THEN 1 ELSE 2 END) AS rn
     FROM (
       SELECT SPLIT_PART(st.sto_store, '-', 1) AS site, st.sto_part,
-             MAX(CAST(st.sto_qty AS DOUBLE))    AS site_oh_qty,
-             MAX(CAST(st.sto_minlev AS DOUBLE)) AS min_level,
-             MAX(CAST(st.sto_maxqty AS DOUBLE)) AS max_level,
-             MAX(st.sto_class)                  AS sto_class,
-             MAX(st.sto_prefmanufactpart)       AS sto_prefmanufactpart,
+             MAX(CAST(st.sto_qty AS FLOAT))    AS site_oh_qty,
+             MAX(CAST(st.sto_minlev AS FLOAT)) AS min_level,
+             MAX(CAST(st.sto_maxqty AS FLOAT)) AS max_level,
+             MAX(st.sto_class)                 AS sto_class,
+             MAX(st.sto_prefmanufactpart)      AS sto_prefmanufactpart,
              'NA' AS region
-      FROM "andes"."rme-gdl.r5stock_apm_na" st
+      FROM andes_bi_ext."rme-gdl".r5stock_apm_na st
       GROUP BY SPLIT_PART(st.sto_store, '-', 1), st.sto_part
       UNION ALL
       SELECT SPLIT_PART(st.sto_store, '-', 1) AS site, st.sto_part,
-             MAX(CAST(st.sto_qty AS DOUBLE))    AS site_oh_qty,
-             MAX(CAST(st.sto_minlev AS DOUBLE)) AS min_level,
-             MAX(CAST(st.sto_maxqty AS DOUBLE)) AS max_level,
-             MAX(st.sto_class)                  AS sto_class,
-             MAX(st.sto_prefmanufactpart)       AS sto_prefmanufactpart,
+             MAX(CAST(st.sto_qty AS FLOAT))    AS site_oh_qty,
+             MAX(CAST(st.sto_minlev AS FLOAT)) AS min_level,
+             MAX(CAST(st.sto_maxqty AS FLOAT)) AS max_level,
+             MAX(st.sto_class)                 AS sto_class,
+             MAX(st.sto_prefmanufactpart)      AS sto_prefmanufactpart,
              'EU' AS region
-      FROM "andes"."rme-gdl.r5stock_apm_eu" st
+      FROM andes_bi_ext."rme-gdl".r5stock_apm_eu st
       GROUP BY SPLIT_PART(st.sto_store, '-', 1), st.sto_part
     ) sto_raw
   ) ranked
@@ -243,17 +243,17 @@ l1_coming_order AS (
   SELECT site, sto_part, SUM(orl_ordqty) AS back_order_qty
   FROM (
     SELECT rl.ord_org AS site, l.orl_part AS sto_part,
-           CAST(l.orl_ordqty AS DOUBLE) AS orl_ordqty
-    FROM "andes"."rme-gdl.r5orderlines_apm_na" l
-      INNER JOIN "andes"."rme-gdl.r5orders_apm_na" rl
-        ON TRIM(CAST(l.orl_order AS VARCHAR)) = TRIM(CAST(rl.ord_code AS VARCHAR))
+           CAST(l.orl_ordqty AS FLOAT) AS orl_ordqty
+    FROM andes_bi_ext."rme-gdl".r5orderlines_apm_na l
+      INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_na rl
+        ON TRIM(CAST(l.orl_order AS VARCHAR(100))) = TRIM(CAST(rl.ord_code AS VARCHAR(100)))
     WHERE rl.ord_status = 'A' AND l.orl_status = 'A'
     UNION ALL
     SELECT rl.ord_org AS site, l.orl_part AS sto_part,
-           CAST(l.orl_ordqty AS DOUBLE) AS orl_ordqty
-    FROM "andes"."rme-gdl.r5orderlines_apm_eu" l
-      INNER JOIN "andes"."rme-gdl.r5orders_apm_eu" rl
-        ON TRIM(CAST(l.orl_order AS VARCHAR)) = TRIM(CAST(rl.ord_code AS VARCHAR))
+           CAST(l.orl_ordqty AS FLOAT) AS orl_ordqty
+    FROM andes_bi_ext."rme-gdl".r5orderlines_apm_eu l
+      INNER JOIN andes_bi_ext."rme-gdl".r5orders_apm_eu rl
+        ON TRIM(CAST(l.orl_order AS VARCHAR(100))) = TRIM(CAST(rl.ord_code AS VARCHAR(100)))
     WHERE rl.ord_status = 'A' AND l.orl_status = 'A'
   ) co
   GROUP BY site, sto_part
