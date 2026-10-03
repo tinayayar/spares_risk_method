@@ -1,0 +1,38 @@
+# ---- OS / editor cruft ----
+.DS_Store
+**/.DS_Store
+.vscode/
+.idea/
+
+# ---- Kiro ----
+.kiro/
+
+# ---- Logs ----
+logs/
+*.log
+
+# ---- Generated report output ----
+flash_report.html
+mapping_report.html
+url_mapping_report.html
+ilm1_heatmap.html
+
+# ---- Data files (inputs/outputs, not source) ----
+# Datasources, extracts, and query results live in Athena/S3; don't track them in git.
+*.csv
+*.xlsx
+*.xls
+
+# ---- Credentials / local run artifacts ----
+flash_report_url.txt
+*.plist
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- Notes ----
+# To track a specific ignored file (e.g. a reference CSV), use:
+#   git add -f path/to/file.csv
