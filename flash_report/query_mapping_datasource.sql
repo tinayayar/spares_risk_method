@@ -17,9 +17,16 @@
 -- =============================================================================
 
 WITH rspl AS (
-  -- USP parts (NA) — routed to NA USP sites only
+  -- USP parts (NA, Rev 6.NA) — routed to the NA USP sites only
   SELECT DISTINCT mpn, catalog_reference, 'USP' AS product
   FROM "default"."rspl_target_parts"
+  WHERE mpn IS NOT NULL AND mpn != ''
+  UNION ALL
+  -- USP parts (NA B1, Rev B1) — routed to the B1 sites only. Internal 'USP_B1'
+  -- tag keeps this list from bleeding into the other NA USP sites; it is
+  -- normalized back to 'USP' in the final output so the report shows one USP product.
+  SELECT DISTINCT mpn, catalog_reference, 'USP_B1' AS product
+  FROM "default"."rspl_target_parts_usp_b1"
   WHERE mpn IS NOT NULL AND mpn != ''
   UNION ALL
   -- USP parts (EU) — routed to EU USP sites only. Internal 'USP_EU' tag keeps the
@@ -40,26 +47,30 @@ WITH rspl AS (
 ),
 
 target_sites AS (
-  -- USP NA sites (54) — use "default"."rspl_target_parts"
+  -- USP NA sites (23, Rev 6.NA) — use "default"."rspl_target_parts"
   SELECT site, 'USP' AS product FROM (VALUES
-    ('ABQ1'), ('AGS1'), ('AKC1'), ('AUS2'), ('BDL4'), ('BOS3'), ('BWI2'), ('DAB2'),
-    ('DEN4'), ('DEN9'), ('DET6'), ('DSA6'), ('ELP1'), ('FSD1'), ('FWA6'), ('GEG1'),
-    ('GYR1'), ('HOU6'), ('IAG1'), ('IGQ1'), ('ILM1'), ('LUK2'), ('MKC6'), ('MLI1'),
-    ('MQY1'), ('MTN1'), ('OMA2'), ('ORD5'), ('ORF3'), ('ORF4'), ('ORH3'), ('OXR1'),
-    ('PAE2'), ('PDX8'), ('PVD2'), ('RIC4'), ('RIC6'), ('SAN3'), ('SAT3'), ('SAV4'),
-    ('SBD6'), ('SBN1'), ('SCK6'), ('SHV1'), ('SYR1'), ('TLH2'), ('TPA4'), ('TYS1'),
-    ('VGT1'), ('YEG2'), ('YHM1'), ('YOW3'), ('YXU1'), ('YYC4')
+    ('AUS2'), ('DEN4'), ('DEN9'), ('ELP1'), ('FSD1'), ('FWA6'), ('GEG1'),
+    ('IAG1'), ('ILM1'), ('MQY1'), ('OMA2'), ('ORF4'), ('ORH3'), ('PAE2'), ('PDX8'),
+    ('SBD6'), ('SHV1'), ('VGT1'), ('YEG2'), ('YHM1'), ('YOW3'), ('YXU1'), ('YYC4')
   ) AS t(site)
   UNION ALL
-  -- USP EU sites (13) — use "default"."rspl_target_parts_usp_eu"
+  -- USP NA B1 sites (31, Rev B1) — use "default"."rspl_target_parts_usp_b1"
+  SELECT site, 'USP_B1' AS product FROM (VALUES
+    ('ABQ1'), ('AGS1'), ('AKC1'), ('BDL4'), ('BOS3'), ('BWI2'), ('DAB2'), ('DET6'),
+    ('GYR1'), ('HOU6'), ('IGQ1'), ('LUK2'), ('MKC6'), ('MLI1'), ('MTN1'), ('ORD5'),
+    ('ORF3'), ('OXR1'), ('PVD2'), ('RIC4'), ('RIC6'), ('SAN3'), ('SAT3'), ('SAV4'),
+    ('SBN1'), ('SCK6'), ('SYR1'), ('TLH2'), ('TPA4'), ('TUL2'), ('TYS1')
+  ) AS t(site)
+  UNION ALL
+  -- USP EU sites (14) — use "default"."rspl_target_parts_usp_eu"
   SELECT site, 'USP_EU' AS product FROM (VALUES
-    ('BCN4'), ('BHX2'), ('BRQ2'), ('DUS4'), ('EMA2'), ('KTW3'), ('LCY3'), ('LYS2'),
-    ('MXP6'), ('NCL1'), ('POZ2'), ('STN6'), ('SVQ1')
+    ('BCN4'), ('BHX2'), ('BRQ2'), ('DSA6'), ('DUS4'), ('EMA2'), ('KTW3'), ('LCY3'),
+    ('LYS2'), ('MXP6'), ('NCL1'), ('POZ2'), ('STN6'), ('SVQ1')
   ) AS t(site)
   UNION ALL
-  -- URL Rev C sites (3)
+  -- URL Rev C sites (1)
   SELECT site, 'URL Rev C' AS product FROM (VALUES
-    ('SHV1'), ('ORF3'), ('ORF4')
+    ('SHV1')
   ) AS t(site)
   UNION ALL
   -- URL Rev C2 sites (8) — ORF3/ORF4 have both Rev C and Rev C2
@@ -205,7 +216,9 @@ SELECT
   catalogue_path_source,
   rspl_mpn,
   rspl_catref,
-  CASE WHEN product = 'USP_EU' THEN 'USP' ELSE product END AS product,
+  CASE WHEN product = 'USP_EU' THEN 'USP EU'
+       WHEN product = 'USP_B1' THEN 'USP B1'
+       ELSE product END AS product,
   mapping_status,
   match_confidence
 FROM matched_with_group_flag
@@ -223,7 +236,9 @@ SELECT
   CAST(NULL AS VARCHAR) AS catalogue_path_source,
   nf.mpn AS rspl_mpn,
   nf.catalog_reference AS rspl_catref,
-  CASE WHEN nf.product = 'USP_EU' THEN 'USP' ELSE nf.product END AS product,
+  CASE WHEN nf.product = 'USP_EU' THEN 'USP EU'
+       WHEN nf.product = 'USP_B1' THEN 'USP B1'
+       ELSE nf.product END AS product,
   'No APN found' AS mapping_status,
   CAST(NULL AS VARCHAR) AS match_confidence
 FROM (

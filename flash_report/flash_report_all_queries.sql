@@ -58,7 +58,7 @@ active_reqs AS (
     INNER JOIN "andes"."rme-gdl.r5requisitions_apm_na" rh
       ON trim(cast(rl.rql_req AS varchar)) = trim(cast(rh.req_code AS varchar))
   WHERE rl.rql_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
-    AND rh.req_status = 'A' AND rl.rql_status = 'A'
+    AND rh.req_status IN ('A', 'SUB') AND rl.rql_status = 'A'
   UNION ALL
   SELECT rl.rql_part AS part, rh.req_org AS site,
          trim(cast(rl.rql_req AS varchar)) AS req_number,
@@ -69,7 +69,7 @@ active_reqs AS (
     INNER JOIN "andes"."rme-gdl.r5requisitions_apm_eu" rh
       ON trim(cast(rl.rql_req AS varchar)) = trim(cast(rh.req_code AS varchar))
   WHERE rl.rql_part IN (SELECT apn FROM mapping WHERE apn IS NOT NULL)
-    AND rh.req_status = 'A' AND rl.rql_status = 'A'
+    AND rh.req_status IN ('A', 'SUB') AND rl.rql_status = 'A'
 ),
 
 -- Keep only most recent PR per site+apn
