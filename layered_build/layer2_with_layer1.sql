@@ -13,67 +13,43 @@
 
 WITH
 -- Authoritative site -> product mapping.
--- USP_EU is normalized to USP for matching (the raw table has no region split).
--- Site lists are expressed as SELECT ... UNION ALL for cross-engine compatibility.
+-- Reads from two Andes tables:
+--   1. hw_critical_spares_target_sites: USP and URL products (already standardized)
+--   2. hw_spares_ar_install_base: Other products (Robin, etc.) — uppercased here
+-- Products are standardized to uppercase (e.g., 'USP', 'USP_B1', 'URL Rev D', 'ROBIN', 'CARDINAL').
 target_sites AS (
-  -- USP (NA)
-  SELECT 'ABQ1' AS site, 'USP' AS product UNION ALL SELECT 'AGS1', 'USP' UNION ALL
-  SELECT 'AKC1', 'USP' UNION ALL SELECT 'AUS2', 'USP' UNION ALL SELECT 'BDL4', 'USP' UNION ALL
-  SELECT 'BOS3', 'USP' UNION ALL SELECT 'BWI2', 'USP' UNION ALL SELECT 'DAB2', 'USP' UNION ALL
-  SELECT 'DEN4', 'USP' UNION ALL SELECT 'DEN9', 'USP' UNION ALL SELECT 'DET6', 'USP' UNION ALL
-  SELECT 'ELP1', 'USP' UNION ALL SELECT 'FSD1', 'USP' UNION ALL SELECT 'FWA6', 'USP' UNION ALL
-  SELECT 'GEG1', 'USP' UNION ALL SELECT 'GYR1', 'USP' UNION ALL SELECT 'HOU6', 'USP' UNION ALL
-  SELECT 'IAG1', 'USP' UNION ALL SELECT 'IGQ1', 'USP' UNION ALL SELECT 'ILM1', 'USP' UNION ALL
-  SELECT 'LUK2', 'USP' UNION ALL SELECT 'MKC6', 'USP' UNION ALL SELECT 'MLI1', 'USP' UNION ALL
-  SELECT 'MQY1', 'USP' UNION ALL SELECT 'MTN1', 'USP' UNION ALL SELECT 'OMA2', 'USP' UNION ALL
-  SELECT 'ORD5', 'USP' UNION ALL SELECT 'ORF3', 'USP' UNION ALL SELECT 'ORF4', 'USP' UNION ALL
-  SELECT 'ORH3', 'USP' UNION ALL SELECT 'OXR1', 'USP' UNION ALL SELECT 'PAE2', 'USP' UNION ALL
-  SELECT 'PDX8', 'USP' UNION ALL SELECT 'PVD2', 'USP' UNION ALL SELECT 'RIC4', 'USP' UNION ALL
-  SELECT 'RIC6', 'USP' UNION ALL SELECT 'SAN3', 'USP' UNION ALL SELECT 'SAT3', 'USP' UNION ALL
-  SELECT 'SAV4', 'USP' UNION ALL SELECT 'SBD6', 'USP' UNION ALL SELECT 'SBN1', 'USP' UNION ALL
-  SELECT 'SCK6', 'USP' UNION ALL SELECT 'SHV1', 'USP' UNION ALL SELECT 'SYR1', 'USP' UNION ALL
-  SELECT 'TLH2', 'USP' UNION ALL SELECT 'TPA4', 'USP' UNION ALL SELECT 'TYS1', 'USP' UNION ALL
-  SELECT 'VGT1', 'USP' UNION ALL SELECT 'YEG2', 'USP' UNION ALL SELECT 'YHM1', 'USP' UNION ALL
-  SELECT 'YOW3', 'USP' UNION ALL SELECT 'YXU1', 'USP' UNION ALL SELECT 'YYC4', 'USP' UNION ALL
-  -- USP (EU) — normalized to USP
-  SELECT 'BCN4', 'USP' UNION ALL SELECT 'BHX2', 'USP' UNION ALL SELECT 'BRQ2', 'USP' UNION ALL
-  SELECT 'DSA6', 'USP' UNION ALL SELECT 'DUS4', 'USP' UNION ALL SELECT 'EMA2', 'USP' UNION ALL
-  SELECT 'KTW3', 'USP' UNION ALL SELECT 'LCY3', 'USP' UNION ALL SELECT 'LYS2', 'USP' UNION ALL
-  SELECT 'MXP6', 'USP' UNION ALL SELECT 'NCL1', 'USP' UNION ALL SELECT 'POZ2', 'USP' UNION ALL
-  SELECT 'STN6', 'USP' UNION ALL SELECT 'SVQ1', 'USP' UNION ALL
-  -- URL Rev C
-  SELECT 'SHV1', 'URL Rev C' UNION ALL SELECT 'ORF3', 'URL Rev C' UNION ALL
-  SELECT 'ORF4', 'URL Rev C' UNION ALL
-  -- URL Rev C2
-  SELECT 'CLE3', 'URL Rev C2' UNION ALL SELECT 'BCN4', 'URL Rev C2' UNION ALL
-  SELECT 'ORH3', 'URL Rev C2' UNION ALL SELECT 'PAE2', 'URL Rev C2' UNION ALL
-  SELECT 'DEN9', 'URL Rev C2' UNION ALL SELECT 'IAG1', 'URL Rev C2' UNION ALL
-  SELECT 'ORF3', 'URL Rev C2' UNION ALL SELECT 'ORF4', 'URL Rev C2' UNION ALL
-  -- URL Rev D
-  SELECT 'BDL4', 'URL Rev D' UNION ALL SELECT 'BOS3', 'URL Rev D' UNION ALL
-  SELECT 'ILM1', 'URL Rev D' UNION ALL SELECT 'RIC4', 'URL Rev D' UNION ALL
-  SELECT 'SYR1', 'URL Rev D' UNION ALL SELECT 'YOW3', 'URL Rev D' UNION ALL
-  SELECT 'TPA4', 'URL Rev D' UNION ALL SELECT 'MQY1', 'URL Rev D' UNION ALL
-  SELECT 'TYS1', 'URL Rev D' UNION ALL SELECT 'DCA1', 'URL Rev D' UNION ALL
-  SELECT 'RIC6', 'URL Rev D' UNION ALL SELECT 'LUK2', 'URL Rev D' UNION ALL
-  SELECT 'DUS4', 'URL Rev D'
+  -- USP and URL from target_sites table (already standardized format)
+  SELECT site, product
+  FROM "andes"."ar-performance-n-insights.hw_critical_spares_target_sites"
+  
+  UNION
+  
+  -- Other products from install_base — UPPER() to standardize case
+  SELECT DISTINCT site, UPPER(TRIM(product)) AS product
+  FROM "andes"."ar-performance-n-insights.hw_spares_ar_install_base"
+  WHERE machine_cnt > 0  -- Only sites with active machines
 ),
 
 valid_site_product AS (
   SELECT DISTINCT site, product FROM target_sites
 ),
 
--- Raw APM table with corrected product label derived from product + rspl_rev.
+-- Raw APM table with corrected product label derived from product + rspl_rev + region + version.
 -- INNER JOIN to valid_site_product drops rows with wrong site/product combos.
 layer1_corrected AS (
   SELECT
     d.site,
     CASE
+      -- USP: split by region and version
+      WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.region)) = 'EU' THEN 'USP_EU'
+      WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.version)) = 'B1' THEN 'USP_B1'
       WHEN UPPER(TRIM(d.product)) = 'USP' THEN 'USP'
+      -- URL: split by rspl_rev (handle both 'C2' and 'C.2' variants)
       WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C'  THEN 'URL Rev C'
-      WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C2' THEN 'URL Rev C2'
+      WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) IN ('C2', 'C.2') THEN 'URL Rev C2'
       WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'D'  THEN 'URL Rev D'
-      ELSE NULL
+      -- Other products: uppercase the product name directly
+      ELSE UPPER(TRIM(d.product))
     END AS product,
     d.mpn,
     d.catalogue_reference,
@@ -103,11 +79,16 @@ layer1_corrected AS (
     INNER JOIN valid_site_product v
       ON v.site = d.site
      AND v.product = CASE
+           -- USP: split by region and version
+           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.region)) = 'EU' THEN 'USP_EU'
+           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.version)) = 'B1' THEN 'USP_B1'
            WHEN UPPER(TRIM(d.product)) = 'USP' THEN 'USP'
+           -- URL: split by rspl_rev (handle both 'C2' and 'C.2' variants)
            WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C'  THEN 'URL Rev C'
-           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C2' THEN 'URL Rev C2'
+           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) IN ('C2', 'C.2') THEN 'URL Rev C2'
            WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'D'  THEN 'URL Rev D'
-           ELSE NULL
+           -- Other products: uppercase the product name directly
+           ELSE UPPER(TRIM(d.product))
          END
 ),
 
@@ -170,10 +151,17 @@ site_product_dq AS (
          -- problem (incorrect_apm_setup), else 0.
          CASE WHEN COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END) >= 50
               THEN 5 ELSE 0 END AS incorrect_apm_setup_penalty,
-         -- Site+product penalty: 5 when >= 10 distinct MPNs have no APN mapped,
-         -- else 0.
-         CASE WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 10
-              THEN 5 ELSE 0 END AS no_apn_mapped_penalty
+         -- Site+product graduated penalty on distinct MPNs with no APN mapped.
+         -- Tiers (Option 1) replace the old flat ">=10 -> 5" step so the worst
+         -- site+products are no longer under-rated vs merely-over-threshold:
+         --   >=50 -> 10,  >=25 -> 8,  >=10 -> 5,  >=1 -> 2,  0 -> 0.
+         CASE
+           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 50 THEN 10
+           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 25 THEN 8
+           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 10 THEN 5
+           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 1  THEN 2
+           ELSE 0
+         END AS no_apn_mapped_penalty
   FROM layer1_corrected
   GROUP BY site, product
 ),
@@ -261,32 +249,72 @@ l1_coming_order AS (
 
 -- Site + product level part count.
 -- Counts parts (APNs) by site + product to match the output grain.
--- Uses the same product derivation as the final SELECT: l1.product if available,
--- otherwise l2.product_list for Layer-2-only parts.
+-- Uses l1.product directly (no fallback). Layer-2-only parts have NULL product.
 -- Used to scale part-level scores to site+product level in QuickSight.
 site_product_part_count AS (
   SELECT
     COALESCE(l2.site, l1.site) AS site,
-    CASE
-      WHEN l1.product IS NULL
-        OR TRIM(l1.product) = ''
-        OR UPPER(TRIM(l1.product)) IN ('N/A', 'NA')
-      THEN l2.product_list
-      ELSE l1.product
-    END AS product,
+    l1.product,
     COUNT(COALESCE(l2.part, l1.apn)) AS sp_part_count
   FROM layer2 l2
     FULL OUTER JOIN layer1 l1
       ON l1.site = l2.site
      AND l1.apn  = l2.part
-  GROUP BY COALESCE(l2.site, l1.site),
-           CASE
-             WHEN l1.product IS NULL
-               OR TRIM(l1.product) = ''
-               OR UPPER(TRIM(l1.product)) IN ('N/A', 'NA')
-             THEN l2.product_list
-             ELSE l1.product
-           END
+  GROUP BY COALESCE(l2.site, l1.site), l1.product
+),
+
+-- Site + product level counts for inventory/review status categories.
+-- Joins layer2 + layer1 + l1_stock + l1_coming_order to compute the same
+-- inventory-based flags used in the final SELECT.
+site_product_status_counts AS (
+  SELECT
+    COALESCE(l2.site, l1.site) AS site,
+    l1.product,
+    -- MIN/MAX review: stockout_days_yr_min_150d > 0
+    COUNT(CASE WHEN COALESCE(l2.stockout_days_yr_min_150d, 0) > 0 THEN 1 END) AS sp_need_min_max_review_count,
+    -- Lead time review: stockout_days_yr_rep_150d > 0
+    COUNT(CASE WHEN COALESCE(l2.stockout_days_yr_rep_150d, 0) > 0 THEN 1 END) AS sp_need_lead_time_review_count,
+    -- Stockout no PO: OH = 0 AND no PO (only for parts with APN)
+    COUNT(CASE 
+      WHEN COALESCE(l2.part, l1.apn) IS NOT NULL
+       AND COALESCE(l2.site_oh_qty, ls.site_oh_qty, 0.0) = 0
+       AND COALESCE(l2.back_order_qty, lco.back_order_qty, 0.0) = 0 
+      THEN 1 
+    END) AS sp_stockout_no_po_count,
+    -- Stockout with PO: OH = 0 AND PO exists
+    COUNT(CASE 
+      WHEN COALESCE(l2.part, l1.apn) IS NOT NULL
+       AND COALESCE(l2.site_oh_qty, ls.site_oh_qty, 0.0) = 0
+       AND COALESCE(l2.back_order_qty, lco.back_order_qty, 0.0) > 0 
+      THEN 1 
+    END) AS sp_stockout_with_po_count,
+    -- Below MIN no PO: 0 < OH <= MIN AND no PO
+    COUNT(CASE 
+      WHEN COALESCE(l2.part, l1.apn) IS NOT NULL
+       AND COALESCE(l2.site_oh_qty, ls.site_oh_qty, 0.0) > 0
+       AND COALESCE(l2.site_oh_qty, ls.site_oh_qty, 0.0) <= COALESCE(l2.min_level, ls.min_level, 0.0)
+       AND COALESCE(l2.back_order_qty, lco.back_order_qty, 0.0) = 0 
+      THEN 1 
+    END) AS sp_below_min_no_po_count,
+    -- Below MIN with PO: 0 < OH <= MIN AND PO exists
+    COUNT(CASE 
+      WHEN COALESCE(l2.part, l1.apn) IS NOT NULL
+       AND COALESCE(l2.site_oh_qty, ls.site_oh_qty, 0.0) > 0
+       AND COALESCE(l2.site_oh_qty, ls.site_oh_qty, 0.0) <= COALESCE(l2.min_level, ls.min_level, 0.0)
+       AND COALESCE(l2.back_order_qty, lco.back_order_qty, 0.0) > 0 
+      THEN 1 
+    END) AS sp_below_min_with_po_count
+  FROM layer2 l2
+    FULL OUTER JOIN layer1 l1
+      ON l1.site = l2.site
+     AND l1.apn  = l2.part
+    LEFT JOIN l1_stock ls
+      ON ls.site = COALESCE(l2.site, l1.site)
+     AND ls.sto_part = COALESCE(l2.part, l1.apn)
+    LEFT JOIN l1_coming_order lco
+      ON lco.site = COALESCE(l2.site, l1.site)
+     AND lco.sto_part = COALESCE(l2.part, l1.apn)
+  GROUP BY COALESCE(l2.site, l1.site), l1.product
 )
 
 SELECT
@@ -298,7 +326,11 @@ SELECT
   COALESCE(l2.part, l1.apn)  AS part,
 
   -- Layer 2 score columns (NULL for Layer-1-only parts).
-  l2.region,
+  -- Region derived from rts_rcc_facilities.address_country: NA for US/Canada/Mexico, EU otherwise.
+  COALESCE(
+    l2.region,
+    CASE WHEN fac.address_country IN ('United States', 'US', 'USA', 'Canada', 'Mexico') THEN 'NA' ELSE 'EU' END
+  ) AS region,
   l2.amazon_pn,
   l2.part_description,
   l2.cat_ref_list,
@@ -451,25 +483,16 @@ SELECT
     , 4))
   END AS overall_score_criticality_150d,
 
-  l2.ar_region,
-  l2.subregion,
-  l2.type,
-  l2.subtype,
+  COALESCE(l2.ar_region, fac.region) AS ar_region,
+  COALESCE(l2.subregion, fac.subregion) AS subregion,
+  COALESCE(l2.type, fac.type) AS type,
+  COALESCE(l2.subtype, fac.subtype) AS subtype,
 
   -- Layer 1 enrichment (NULL for Layer-2-only parts).
   COALESCE(l1.is_rspl_apn, 0) AS is_rspl_apn,
   CASE WHEN l2.part IS NOT NULL THEN 1 ELSE 0 END AS in_score_base,
-  -- Corrected Layer 1 product, falling back to Layer 2's product_list when the
-  -- Layer 1 product is null/blank/NA (e.g. Layer-2-only rows). product_list is
-  -- taken whole (may be comma-separated). Display fallback only; the site+product
-  -- aggregation CTEs still key on the raw l1.product.
-  CASE
-    WHEN l1.product IS NULL
-      OR TRIM(l1.product) = ''
-      OR UPPER(TRIM(l1.product)) IN ('N/A', 'NA')
-    THEN l2.product_list
-    ELSE l1.product
-  END AS product,
+  -- Corrected Layer 1 product. NULL for Layer-2-only rows (no fallback).
+  l1.product,
   l1.mpn,
   l1.catalogue_reference,
   l1.sto_prefmanufactpart,
@@ -507,7 +530,15 @@ SELECT
   COALESCE(gp.not_set_up_mpn_count, 0) AS not_set_up_mpn_count,
 
   -- Site + product level part count (for scaling part-level scores).
-  COALESCE(spc.sp_part_count, 0) AS sp_part_count
+  COALESCE(spc.sp_part_count, 0) AS sp_part_count,
+
+  -- Site + product level counts for inventory/review status categories.
+  COALESCE(spsc.sp_need_min_max_review_count, 0) AS sp_need_min_max_review_count,
+  COALESCE(spsc.sp_need_lead_time_review_count, 0) AS sp_need_lead_time_review_count,
+  COALESCE(spsc.sp_stockout_no_po_count, 0) AS sp_stockout_no_po_count,
+  COALESCE(spsc.sp_stockout_with_po_count, 0) AS sp_stockout_with_po_count,
+  COALESCE(spsc.sp_below_min_no_po_count, 0) AS sp_below_min_no_po_count,
+  COALESCE(spsc.sp_below_min_with_po_count, 0) AS sp_below_min_with_po_count
 FROM layer2 l2
   FULL OUTER JOIN layer1 l1
     ON l1.site = l2.site
@@ -530,10 +561,10 @@ FROM layer2 l2
    AND lco.sto_part = COALESCE(l2.part, l1.apn)
   LEFT JOIN site_product_part_count spc
     ON spc.site = COALESCE(l2.site, l1.site)
-   AND spc.product = CASE
-         WHEN l1.product IS NULL
-           OR TRIM(l1.product) = ''
-           OR UPPER(TRIM(l1.product)) IN ('N/A', 'NA')
-         THEN l2.product_list
-         ELSE l1.product
-       END
+   AND spc.product = l1.product
+  LEFT JOIN site_product_status_counts spsc
+    ON spsc.site = COALESCE(l2.site, l1.site)
+   AND spsc.product = l1.product
+  -- Facility attributes for ar_region, subregion, type, subtype.
+  LEFT JOIN "andes"."ar-performance-n-insights.rts_rcc_facilities" fac
+    ON fac.code = COALESCE(l2.site, l1.site)
