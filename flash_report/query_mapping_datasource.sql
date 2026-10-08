@@ -62,10 +62,12 @@ target_sites AS (
     ('SBN1'), ('SCK6'), ('SYR1'), ('TLH2'), ('TPA4'), ('TUL2'), ('TYS1')
   ) AS t(site)
   UNION ALL
-  -- USP EU sites (14) — use "default"."rspl_target_parts_usp_eu"
+  -- USP EU sites (24) — use "default"."rspl_target_parts_usp_eu"
   SELECT site, 'USP_EU' AS product FROM (VALUES
     ('BCN4'), ('BHX2'), ('BRQ2'), ('DSA6'), ('DUS4'), ('EMA2'), ('KTW3'), ('LCY3'),
-    ('LYS2'), ('MXP6'), ('NCL1'), ('POZ2'), ('STN6'), ('SVQ1')
+    ('LYS2'), ('MXP6'), ('NCL1'), ('POZ2'), ('STN6'), ('SVQ1'),
+    ('BLQ1'), ('BRS2'), ('EMA1'), ('LBA5'), ('LTN4'), ('MAD7'), ('MME1'), ('NCL2'),
+    ('OVD1'), ('RMU1')
   ) AS t(site)
   UNION ALL
   -- URL Rev C sites (1)
