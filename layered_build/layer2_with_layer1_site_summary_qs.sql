@@ -8,42 +8,52 @@
 
 WITH
 -- Authoritative site -> product mapping.
--- Reads from two Andes tables:
---   1. hw_critical_spares_target_sites: USP and URL products (already standardized)
---   2. hw_spares_ar_install_base: Other products (Robin, etc.) — uppercased here
--- Products are standardized to uppercase (e.g., 'USP', 'USP_B1', 'URL Rev D', 'ROBIN', 'CARDINAL').
+-- Single source: andes_bi_ext."bads".rts_site_to_product_mapping. Build label,
+-- base_product join key, and full numeric version. (Redshift: REGEXP_SUBSTR.)
+-- See layer2_with_layer1.sql for the full rationale.
 target_sites AS (
-  -- USP and URL from target_sites table (already standardized format)
-  SELECT site, product
-  FROM andes_bi_ext."ar-performance-n-insights".hw_critical_spares_target_sites
-  
-  UNION
-  
-  -- Other products from install_base — UPPER() to standardize case
-  SELECT DISTINCT site, UPPER(TRIM(product)) AS product
-  FROM andes_bi_ext."ar-performance-n-insights".hw_spares_ar_install_base
-  WHERE machine_cnt > 0  -- Only sites with active machines
+  SELECT DISTINCT
+    site,
+    CASE
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = '6.EU'  THEN 'USP_EU'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = '6.NA'  THEN 'USP'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = 'B1'    THEN 'USP_B1'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = 'B1+LR' THEN 'USP_B1'
+      WHEN UPPER(TRIM(product)) = 'USP'                                            THEN 'USP'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'C'     THEN 'URL Rev C'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'C.2'   THEN 'URL Rev C2'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'D'     THEN 'URL Rev D'
+      WHEN UPPER(TRIM(product)) = 'SPARROW'                                        THEN 'Sparrow 2.0'
+      ELSE TRIM(product_version)
+    END AS product,
+    CASE
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = '6.EU'  THEN 'USP_EU'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = '6.NA'  THEN 'USP'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = 'B1'    THEN 'USP_B1'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = 'B1+LR' THEN 'USP_B1'
+      WHEN UPPER(TRIM(product)) = 'USP'                                            THEN 'USP'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'C'     THEN 'URL Rev C'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'C.2'   THEN 'URL Rev C2'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'D'     THEN 'URL Rev D'
+      ELSE UPPER(TRIM(product))
+    END AS base_product,
+    CASE
+      WHEN UPPER(TRIM(product)) IN ('USP', 'URL') THEN NULL
+      ELSE NULLIF(REGEXP_SUBSTR(TRIM(product_version), '[0-9]+(\\.[0-9]+)?'), '')
+    END AS version_num
+  FROM andes_bi_ext."bads".rts_site_to_product_mapping
+  WHERE machine_count > 0
+    AND UPPER(TRIM(product)) <> 'TCIS'
 ),
 
 valid_site_product AS (
-  SELECT DISTINCT site, product FROM target_sites
+  SELECT DISTINCT site, product, base_product, version_num FROM target_sites
 ),
 
 layer1_corrected AS (
   SELECT
     d.site,
-    CASE
-      -- USP: split by region and version
-      WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.region)) = 'EU' THEN 'USP_EU'
-      WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.version)) = 'B1' THEN 'USP_B1'
-      WHEN UPPER(TRIM(d.product)) = 'USP' THEN 'USP'
-      -- URL: split by rspl_rev (handle both 'C2' and 'C.2' variants)
-      WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C'  THEN 'URL Rev C'
-      WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) IN ('C2', 'C.2') THEN 'URL Rev C2'
-      WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'D'  THEN 'URL Rev D'
-      -- Other products: uppercase the product name directly
-      ELSE UPPER(TRIM(d.product))
-    END AS product,
+    v.product AS product,
     d.mpn,
     d.catalogue_reference,
     CASE
@@ -64,18 +74,21 @@ layer1_corrected AS (
   FROM andes_bi_ext."ar-performance-n-insights".hw_critical_spares_apm_setup_details d
     INNER JOIN valid_site_product v
       ON v.site = d.site
-     AND v.product = CASE
-           -- USP: split by region and version
-           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.region)) = 'EU' THEN 'USP_EU'
-           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.version)) = 'B1' THEN 'USP_B1'
-           WHEN UPPER(TRIM(d.product)) = 'USP' THEN 'USP'
-           -- URL: split by rspl_rev (handle both 'C2' and 'C.2' variants)
-           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C'  THEN 'URL Rev C'
-           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) IN ('C2', 'C.2') THEN 'URL Rev C2'
-           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'D'  THEN 'URL Rev D'
-           -- Other products: uppercase the product name directly
+     AND v.base_product = CASE
+           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.region))  = 'EU'          THEN 'USP_EU'
+           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.version)) = 'B1'          THEN 'USP_B1'
+           WHEN UPPER(TRIM(d.product)) = 'USP'                                            THEN 'USP'
+           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C'          THEN 'URL Rev C'
+           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) IN ('C2','C.2') THEN 'URL Rev C2'
+           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'D'          THEN 'URL Rev D'
            ELSE UPPER(TRIM(d.product))
          END
+     AND (
+          v.version_num IS NULL
+       OR NULLIF(REGEXP_SUBSTR(TRIM(CAST(d.rspl_rev AS VARCHAR(100))), '[0-9]+(\\.[0-9]+)?'), '') IS NULL
+       OR v.version_num
+            = NULLIF(REGEXP_SUBSTR(TRIM(CAST(d.rspl_rev AS VARCHAR(100))), '[0-9]+(\\.[0-9]+)?'), '')
+         )
 ),
 
 layer1 AS (
@@ -107,18 +120,23 @@ site_product_dq AS (
          COUNT(DISTINCT CASE WHEN multiple_apns       = 1 THEN mpn END) AS multiple_apns_count,
          COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END)             AS no_apn_mapped_count,
          COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END) AS incorrect_apm_setup_count,
-         CASE WHEN COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END) >= 50
-              THEN 5 ELSE 0 END AS incorrect_apm_setup_penalty,
-         -- Graduated tiers (Option 1) on distinct MPNs with no APN mapped --
-         -- same bands as layer2_with_layer1.sql so the two files agree:
-         --   >=50 -> 10,  >=25 -> 8,  >=10 -> 5,  >=1 -> 2,  0 -> 0.
-         CASE
-           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 50 THEN 10
-           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 25 THEN 8
-           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 10 THEN 5
-           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 1  THEN 2
-           ELSE 0
-         END AS no_apn_mapped_penalty
+         -- MPNs with at least one APN mapped (counted once per MPN).
+         COUNT(DISTINCT CASE WHEN apn IS NOT NULL THEN mpn END)         AS mpn_found_count,
+
+         -- Percentage-based APM setup risk, aligned with layer2_with_layer1_qs.sql.
+         -- Shares of the product's distinct MPNs (0..1); overlap allowed.
+         ROUND(1.0 * COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END)
+               / NULLIF(COUNT(DISTINCT mpn), 0), 4)                     AS pct_no_apn_mapped,
+         ROUND(1.0 * COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END)
+               / NULLIF(COUNT(DISTINCT mpn), 0), 4)                     AS pct_incorrect_apm_setup,
+         -- Per-product APM setup risk, 0..150:
+         --   100 * (1.0 * pct_no_apn_mapped + 0.5 * pct_incorrect_apm_setup)
+         ROUND(100.0 * (
+                 1.0 * (1.0 * COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END)
+                        / NULLIF(COUNT(DISTINCT mpn), 0))
+               + 0.5 * (1.0 * COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END)
+                        / NULLIF(COUNT(DISTINCT mpn), 0))
+               ), 2)                                                    AS apm_setup_risk_score
   FROM layer1_corrected
   GROUP BY site, product
 ),
@@ -282,18 +300,15 @@ site_product_rspl_full AS (
     a.sp_stockout_with_po_count,
     a.sp_below_min_no_po_count,
     a.sp_below_min_with_po_count,
-    -- DQ counts only for RSPL parts; NULL for non-RSPL
+    -- DQ counts/rates only for RSPL parts; NULL for non-RSPL
     CASE WHEN a.is_rspl_apn = 1 THEN COALESCE(d.no_apn_mapped_count, 0) ELSE NULL END AS sp_no_apn_mapped_count,
     CASE WHEN a.is_rspl_apn = 1 THEN COALESCE(d.incorrect_apm_setup_count, 0) ELSE NULL END AS sp_incorrect_apm_setup_count,
-    CASE WHEN a.is_rspl_apn = 1 THEN COALESCE(d.incorrect_apm_setup_penalty, 0) ELSE NULL END AS sp_incorrect_apm_setup_penalty,
-    CASE WHEN a.is_rspl_apn = 1 THEN COALESCE(d.no_apn_mapped_penalty, 0) ELSE NULL END AS sp_no_apn_mapped_penalty,
-    -- APM setup risk = 7 * no-APN-mapped penalty + incorrect-setup penalty.
-    -- no-APN is weighted x7 (the priority signal); incorrect-setup enters at
-    -- weight 1 (secondary). (NULL for non-RSPL.)
-    CASE WHEN a.is_rspl_apn = 1 
-         THEN 7 * COALESCE(d.no_apn_mapped_penalty, 0) + COALESCE(d.incorrect_apm_setup_penalty, 0)
-         ELSE NULL 
-    END AS sp_apm_setup_risk_score
+    CASE WHEN a.is_rspl_apn = 1 THEN COALESCE(d.mpn_found_count, 0) ELSE NULL END AS sp_mpn_found_count,
+    CASE WHEN a.is_rspl_apn = 1 THEN COALESCE(d.pct_no_apn_mapped, 0) ELSE NULL END AS sp_pct_no_apn_mapped,
+    CASE WHEN a.is_rspl_apn = 1 THEN COALESCE(d.pct_incorrect_apm_setup, 0) ELSE NULL END AS sp_pct_incorrect_apm_setup,
+    -- Per-product APM setup risk = 100*(1.0*pct_no_apn + 0.5*pct_incorrect),
+    -- aligned with layer2_with_layer1_qs.sql. (NULL for non-RSPL.)
+    CASE WHEN a.is_rspl_apn = 1 THEN COALESCE(d.apm_setup_risk_score, 0) ELSE NULL END AS sp_apm_setup_risk_score
   FROM site_product_rspl_agg a
     LEFT JOIN site_product_dq d ON d.site = a.site AND d.product = a.product AND a.is_rspl_apn = 1
 )
@@ -320,6 +335,9 @@ SELECT
   -- MPN and APN counts (sum across products)
   SUM(sp_mpn_count) AS site_mpn_count,
   SUM(sp_apn_count) AS site_apn_count,
+  -- Distinct MPNs with at least one APN mapped (summed across products,
+  -- same roll-up convention as site_mpn_count / site_apn_count).
+  SUM(sp_mpn_found_count) AS site_mpn_found_count,
   
   -- Structural and situational score sums
   SUM(sp_sum_structural_score) AS site_sum_structural_score,
@@ -329,26 +347,25 @@ SELECT
   ROUND(100.0 * SUM(sp_sum_structural_score) / NULLIF(SUM(sp_apn_count), 0), 2) AS site_scaled_structural_score,
   ROUND(100.0 * SUM(sp_sum_situational_score) / NULLIF(SUM(sp_apn_count), 0), 2) AS site_scaled_situational_score,
   
-  -- APM setup risk score, NORMALIZED by the number of (RSPL) products at the
-  -- site: SUM(sp_apm_setup_risk_score) / COUNT(DISTINCT product). This removes
-  -- the "site looks worse just because it has more products" bias -- it is the
-  -- average APM-setup penalty per product. COUNT(DISTINCT product) is RSPL-only
-  -- on this row because the final SELECT groups by site + is_rspl_apn, and the
-  -- penalty is non-NULL only for the is_rspl_apn = 1 row. (NULL for non-RSPL.)
+  -- APM setup risk score = AVERAGE of per-product APM setup risk across the
+  -- site's RSPL products: SUM(sp_apm_setup_risk_score) / COUNT(DISTINCT product).
+  -- Each per-product score is 100*(1.0*pct_no_apn + 0.5*pct_incorrect), aligned
+  -- with layer2_with_layer1_qs.sql. Averaging removes the "site looks worse just
+  -- because it has more products" bias. COUNT(DISTINCT product) is RSPL-only on
+  -- this row because the final SELECT groups by site + is_rspl_apn and the score
+  -- is non-NULL only for the is_rspl_apn = 1 row. (NULL for non-RSPL.)
   ROUND(SUM(sp_apm_setup_risk_score) * 1.0 / NULLIF(COUNT(DISTINCT product), 0), 2)
     AS site_apm_setup_risk_score,
-  -- Component penalties, normalized by product count the SAME way as the
-  -- combined score above, so the two components add up to site_apm_setup_risk_score.
-  ROUND(SUM(sp_incorrect_apm_setup_penalty) * 1.0 / NULLIF(COUNT(DISTINCT product), 0), 2)
-    AS site_incorrect_apm_setup_penalty,
-  ROUND(SUM(sp_no_apn_mapped_penalty) * 1.0 / NULLIF(COUNT(DISTINCT product), 0), 2)
-    AS site_no_apn_mapped_penalty,
+  -- Average per-product rates (the two components behind the score), same
+  -- per-product averaging so they are consistent with site_apm_setup_risk_score.
+  ROUND(SUM(sp_pct_no_apn_mapped) * 1.0 / NULLIF(COUNT(DISTINCT product), 0), 4)
+    AS site_avg_pct_no_apn_mapped,
+  ROUND(SUM(sp_pct_incorrect_apm_setup) * 1.0 / NULLIF(COUNT(DISTINCT product), 0), 4)
+    AS site_avg_pct_incorrect_apm_setup,
   
   -- Total score = scaled_structural + scaled_situational + apm_setup_risk,
-  -- where apm_setup_risk = (7 * no_apn_penalty + incorrect_setup_penalty)
-  -- already baked into sp_apm_setup_risk_score and normalized per product. The
-  -- APM term is the SAME per-product-normalized value as the standalone
-  -- site_apm_setup_risk_score column, so the two stay consistent.
+  -- where apm_setup_risk is the per-product-averaged APM setup risk above
+  -- (same value as the standalone site_apm_setup_risk_score column).
   -- For non-RSPL parts, APM setup risk is excluded (treated as 0).
   ROUND(
     COALESCE(100.0 * SUM(sp_sum_structural_score) / NULLIF(SUM(sp_apn_count), 0), 0)

@@ -13,44 +13,90 @@
 
 WITH
 -- Authoritative site -> product mapping.
--- Reads from two Andes tables:
---   1. hw_critical_spares_target_sites: USP and URL products (already standardized)
---   2. hw_spares_ar_install_base: Other products (Robin, etc.) — uppercased here
--- Products are standardized to uppercase (e.g., 'USP', 'USP_B1', 'URL Rev D', 'ROBIN', 'CARDINAL').
+-- Single source: "andes"."bads.rts_site_to_product_mapping" carries ALL products
+-- (USP, URL, SAS, TCC, SPARROW, ...) with product + product_version as separate
+-- columns. We build the standardized product label AND a major-version key so
+-- the join to the APM table keeps only the version a site actually runs.
+--
+-- Label (approach B): USP/URL mapped explicitly (version lives in the label);
+-- every other product uses product_version directly as the label (e.g.
+-- 'TCC 3.1', 'SAS 2.0'), with two renames: USP 'B1+LR' -> 'USP_B1', and
+-- Sparrow 'Gen 2.0' -> 'Sparrow 2.0'.
+--
+-- Version number: the FULL numeric version from product_version, decimals
+-- included (TCC 3.0 -> 3.0, TCC 3.1 -> 3.1, SAS 2.5 -> 2.5). The APM table's
+-- rspl_rev is also fine-grained (2.2 / 3.0 / 3.1 / 4.0), so matching on the
+-- full version keeps ONLY the exact version a site runs (ATL2 = TCC 3.1 keeps
+-- rspl_rev 3.1 and drops 2.2 / 3.0 / 4.0). Applied ONLY to non-USP/URL. For
+-- USP/URL the version is in the label, so this is NULL on both sides. Products
+-- whose APM rspl_rev = 'A' (or whose mapping version has no number) -> NULL ->
+-- matched on base product alone.
+--
+-- machine_count > 0 keeps only active sites. TCIS is excluded (version cannot
+-- be reconciled with the APM table). HOU6 has a known upstream issue (lists
+-- multiple versions per product) but is intentionally included.
 target_sites AS (
-  -- USP and URL from target_sites table (already standardized format)
-  SELECT site, product
-  FROM "andes"."ar-performance-n-insights.hw_critical_spares_target_sites"
-  
-  UNION
-  
-  -- Other products from install_base — UPPER() to standardize case
-  SELECT DISTINCT site, UPPER(TRIM(product)) AS product
-  FROM "andes"."ar-performance-n-insights.hw_spares_ar_install_base"
-  WHERE machine_cnt > 0  -- Only sites with active machines
+  SELECT DISTINCT
+    site,
+    CASE
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = '6.EU'  THEN 'USP_EU'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = '6.NA'  THEN 'USP'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = 'B1'    THEN 'USP_B1'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = 'B1+LR' THEN 'USP_B1'
+      WHEN UPPER(TRIM(product)) = 'USP'                                            THEN 'USP'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'C'     THEN 'URL Rev C'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'C.2'   THEN 'URL Rev C2'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'D'     THEN 'URL Rev D'
+      WHEN UPPER(TRIM(product)) = 'SPARROW'                                        THEN 'Sparrow 2.0'
+      ELSE TRIM(product_version)
+    END AS product,
+    -- Base product used as the JOIN key against the APM table (which only has
+    -- the bare product name). USP/URL use their standardized label as the key
+    -- (the APM side rebuilds the same label); all others use the bare name.
+    CASE
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = '6.EU'  THEN 'USP_EU'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = '6.NA'  THEN 'USP'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = 'B1'    THEN 'USP_B1'
+      WHEN UPPER(TRIM(product)) = 'USP' AND UPPER(TRIM(product_version)) = 'B1+LR' THEN 'USP_B1'
+      WHEN UPPER(TRIM(product)) = 'USP'                                            THEN 'USP'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'C'     THEN 'URL Rev C'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'C.2'   THEN 'URL Rev C2'
+      WHEN UPPER(TRIM(product)) = 'URL' AND UPPER(TRIM(product_version)) = 'D'     THEN 'URL Rev D'
+      ELSE UPPER(TRIM(product))
+    END AS base_product,
+    CASE
+      WHEN UPPER(TRIM(product)) IN ('USP', 'URL') THEN NULL
+      ELSE NULLIF(REGEXP_EXTRACT(TRIM(product_version), '([0-9]+(\.[0-9]+)?)', 1), '')
+    END AS version_num
+  FROM "andes"."bads.rts_site_to_product_mapping"
+  WHERE machine_count > 0
+    -- TCIS excluded: its version cannot be reconciled with the APM table
+    -- (mapping has no numeric version; APM has rspl_rev 4.0). Dropping it from
+    -- the allowlist keeps TCIS out of the RSPL/APM analysis entirely.
+    AND UPPER(TRIM(product)) <> 'TCIS'
 ),
 
 valid_site_product AS (
-  SELECT DISTINCT site, product FROM target_sites
+  SELECT DISTINCT site, product, base_product, version_num FROM target_sites
 ),
 
--- Raw APM table with corrected product label derived from product + rspl_rev + region + version.
--- INNER JOIN to valid_site_product drops rows with wrong site/product combos.
+-- Raw APM table joined to the authoritative site->product mapping.
+-- The APM table only knows a bare product (TCC, SAS, ...) + rspl_rev, so it
+-- cannot by itself reconstruct a fine label like 'TCC 3.1'. Instead we join to
+-- valid_site_product on site + a reconciled product key + major version, and
+-- take the authoritative label (v.product) from the mapping table.
+--
+-- Reconciled APM-side key:
+--   * USP/URL   -> the explicit standardized label (version lives in the label),
+--                  major version = NULL (matches the mapping's NULL).
+--   * all others -> base product UPPER(d.product), with major version = leading
+--                   integer of rspl_rev ('3' -> 3, '4.0' -> 4, 'A' -> NULL).
+--     This drops wrong-version rows (e.g. a TCC-3 site's stray TCC 4.0 rows).
 layer1_corrected AS (
   SELECT
     d.site,
-    CASE
-      -- USP: split by region and version
-      WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.region)) = 'EU' THEN 'USP_EU'
-      WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.version)) = 'B1' THEN 'USP_B1'
-      WHEN UPPER(TRIM(d.product)) = 'USP' THEN 'USP'
-      -- URL: split by rspl_rev (handle both 'C2' and 'C.2' variants)
-      WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C'  THEN 'URL Rev C'
-      WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) IN ('C2', 'C.2') THEN 'URL Rev C2'
-      WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'D'  THEN 'URL Rev D'
-      -- Other products: uppercase the product name directly
-      ELSE UPPER(TRIM(d.product))
-    END AS product,
+    -- Authoritative label from the mapping table (fine version, e.g. 'TCC 3.1').
+    v.product AS product,
     d.mpn,
     d.catalogue_reference,
     CASE
@@ -78,18 +124,31 @@ layer1_corrected AS (
   FROM "andes"."ar-performance-n-insights.hw_critical_spares_apm_setup_details" d
     INNER JOIN valid_site_product v
       ON v.site = d.site
-     AND v.product = CASE
-           -- USP: split by region and version
-           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.region)) = 'EU' THEN 'USP_EU'
-           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.version)) = 'B1' THEN 'USP_B1'
-           WHEN UPPER(TRIM(d.product)) = 'USP' THEN 'USP'
-           -- URL: split by rspl_rev (handle both 'C2' and 'C.2' variants)
-           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C'  THEN 'URL Rev C'
-           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) IN ('C2', 'C.2') THEN 'URL Rev C2'
-           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'D'  THEN 'URL Rev D'
-           -- Other products: uppercase the product name directly
+     -- Match the mapping-table BASE product key (not the fine label):
+     --  * USP/URL  -> the explicit standardized label (version lives in label)
+     --  * others   -> the bare product name
+     AND v.base_product = CASE
+           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.region))  = 'EU'          THEN 'USP_EU'
+           WHEN UPPER(TRIM(d.product)) = 'USP' AND UPPER(TRIM(d.version)) = 'B1'          THEN 'USP_B1'
+           WHEN UPPER(TRIM(d.product)) = 'USP'                                            THEN 'USP'
+           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'C'          THEN 'URL Rev C'
+           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) IN ('C2','C.2') THEN 'URL Rev C2'
+           WHEN UPPER(TRIM(d.product)) = 'URL' AND UPPER(TRIM(d.rspl_rev)) = 'D'          THEN 'URL Rev D'
            ELSE UPPER(TRIM(d.product))
          END
+     -- Full-version filter: enforced ONLY when BOTH sides carry a numeric
+     -- version. The APM rspl_rev is fine-grained (2.2 / 3.0 / 3.1 / 4.0), so an
+     -- exact match keeps only the version the site runs (ATL2 = TCC 3.1 keeps
+     -- rspl_rev 3.1, drops 2.2 / 3.0 / 4.0). When either side has no number
+     -- (USP/URL, 'A'-rev products like SPARROW, or mapping versions with no
+     -- digit like 'TCIS'), the version is not comparable -> fall back to
+     -- matching on base product alone.
+     AND (
+          v.version_num IS NULL
+       OR NULLIF(REGEXP_EXTRACT(TRIM(CAST(d.rspl_rev AS VARCHAR)), '([0-9]+(\.[0-9]+)?)', 1), '') IS NULL
+       OR v.version_num
+            = NULLIF(REGEXP_EXTRACT(TRIM(CAST(d.rspl_rev AS VARCHAR)), '([0-9]+(\.[0-9]+)?)', 1), '')
+         )
 ),
 
 -- Layer 1 deduped to one row per site + product + mpn + apn.
@@ -139,6 +198,8 @@ site_product_apm_gap AS (
 -- (all MPNs, including null-APN parts) so the APN fan-out doesn't inflate them.
 site_product_dq AS (
   SELECT site, product,
+         -- Total distinct MPNs in this site+product (denominator for the rates).
+         COUNT(DISTINCT mpn)                                           AS mpn_count,
          COUNT(DISTINCT CASE WHEN missing_mpn_network = 1 THEN mpn END) AS missing_mpn_network_count,
          COUNT(DISTINCT CASE WHEN missing_mpn_site    = 1 THEN mpn END) AS missing_mpn_site_count,
          COUNT(DISTINCT CASE WHEN missing_crn         = 1 THEN mpn END) AS missing_crn_count,
@@ -147,21 +208,30 @@ site_product_dq AS (
          -- Distinct MPNs with no APN mapped (apn normalized to NULL upstream).
          COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END)            AS no_apn_mapped_count,
          COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END) AS incorrect_apm_setup_count,
-         -- Site+product penalty: 5 when >= 50 distinct MPNs have any APM setup
-         -- problem (incorrect_apm_setup), else 0.
-         CASE WHEN COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END) >= 50
-              THEN 5 ELSE 0 END AS incorrect_apm_setup_penalty,
-         -- Site+product graduated penalty on distinct MPNs with no APN mapped.
-         -- Tiers (Option 1) replace the old flat ">=10 -> 5" step so the worst
-         -- site+products are no longer under-rated vs merely-over-threshold:
-         --   >=50 -> 10,  >=25 -> 8,  >=10 -> 5,  >=1 -> 2,  0 -> 0.
-         CASE
-           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 50 THEN 10
-           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 25 THEN 8
-           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 10 THEN 5
-           WHEN COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END) >= 1  THEN 2
-           ELSE 0
-         END AS no_apn_mapped_penalty
+         -- MPNs with at least one APN mapped (counted once per MPN regardless
+         -- of how many APNs it maps to).
+         COUNT(DISTINCT CASE WHEN apn IS NOT NULL THEN mpn END)        AS mpn_found_count,
+
+         -- Percentage-based APM setup risk (replaces the old count tiers).
+         -- Each is a SHARE of the product's distinct MPNs (0..1):
+         --   pct_no_apn        = MPNs with no APN mapped / all MPNs
+         --   pct_incorrect     = MPNs with any setup error / all MPNs
+         -- (overlap allowed: an MPN can be both unmapped and mis-set-up).
+         ROUND(1.0 * COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END)
+               / NULLIF(COUNT(DISTINCT mpn), 0), 4)                    AS pct_no_apn_mapped,
+         ROUND(1.0 * COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END)
+               / NULLIF(COUNT(DISTINCT mpn), 0), 4)                    AS pct_incorrect_apm_setup,
+
+         -- Combined site+product APM setup risk score, 0..150 scale:
+         --   100 * (1.0 * pct_no_apn_mapped + 0.5 * pct_incorrect_apm_setup)
+         -- no-APN weighted 2x incorrect-setup (1.0 vs 0.5): an untracked part
+         -- is more serious than a mis-configured one.
+         ROUND(100.0 * (
+                 1.0 * (1.0 * COUNT(DISTINCT CASE WHEN apn IS NULL THEN mpn END)
+                        / NULLIF(COUNT(DISTINCT mpn), 0))
+               + 0.5 * (1.0 * COUNT(DISTINCT CASE WHEN incorrect_apm_setup = 1 THEN mpn END)
+                        / NULLIF(COUNT(DISTINCT mpn), 0))
+               ), 2)                                                   AS apm_setup_risk_score
   FROM layer1_corrected
   GROUP BY site, product
 ),
@@ -517,10 +587,15 @@ SELECT
   COALESCE(pd.multiple_apns_count, 0)       AS sp_multiple_apns_count,
   COALESCE(pd.no_apn_mapped_count, 0)       AS sp_no_apn_mapped_count,
   COALESCE(pd.incorrect_apm_setup_count, 0) AS sp_incorrect_apm_setup_count,
-  -- Site+product penalty: 5 when sp_incorrect_apm_setup_count >= 50, else 0.
-  COALESCE(pd.incorrect_apm_setup_penalty, 0) AS sp_incorrect_apm_setup_penalty,
-  -- Site+product penalty: 5 when sp_no_apn_mapped_count >= 10, else 0.
-  COALESCE(pd.no_apn_mapped_penalty, 0)     AS sp_no_apn_mapped_penalty,
+  -- Distinct MPNs with at least one APN mapped at this site+product.
+  COALESCE(pd.mpn_found_count, 0)           AS sp_mpn_found_count,
+  -- Total distinct MPNs at this site+product (denominator for the rates below).
+  COALESCE(pd.mpn_count, 0)                 AS sp_mpn_count,
+  -- Percentage-based APM setup risk (share of MPNs, 0..1).
+  COALESCE(pd.pct_no_apn_mapped, 0)         AS sp_pct_no_apn_mapped,
+  COALESCE(pd.pct_incorrect_apm_setup, 0)   AS sp_pct_incorrect_apm_setup,
+  -- Combined site+product APM setup risk = 100*(1.0*pct_no_apn + 0.5*pct_incorrect).
+  COALESCE(pd.apm_setup_risk_score, 0)      AS sp_apm_setup_risk_score,
 
   -- Distinct MPNs not set up in APM at this site (across all products).
   COALESCE(g.site_not_set_up_mpn_count, 0) AS site_not_set_up_mpn_count,
