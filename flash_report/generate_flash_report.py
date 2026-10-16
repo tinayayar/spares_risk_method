@@ -9,9 +9,206 @@ Output: flash_report.html
 import pandas as pd
 from datetime import date
 import os
+import json
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(SCRIPT_DIR, 'flash_report.html')
+
+# --- KPI 2 PO-status heatmap: Action-Priority labels + colors ----------------
+# Descriptive status labels (P3 shown as "APM-only PO" per request).
+HM_LBL_P1 = 'No PO & No PR'
+HM_LBL_P2 = 'Outdated PO, No PR'
+HM_LBL_P3 = 'APM-only PO'
+HM_LBL_P4 = 'PR, No PO'
+HM_LBL_P5 = 'Recent PO, No PR'
+HM_LBL_P6 = 'PO & PR'
+
+# status -> (background, text color). Red = act; green = ok; yellow = review.
+HM_COLORS = {
+    'On Hand':   ('#C6EFCE', '#006100'),
+    HM_LBL_P5:   ('#C6EFCE', '#006100'),
+    HM_LBL_P6:   ('#C6EFCE', '#006100'),
+    HM_LBL_P1:   ('#FFC7CE', '#9C0006'),
+    HM_LBL_P2:   ('#FFC7CE', '#9C0006'),
+    HM_LBL_P4:   ('#FFC7CE', '#9C0006'),
+    HM_LBL_P3:   ('#FFEB9C', '#9C5700'),
+    'Not in APM':('#FFEB9C', '#9C5700'),
+}
+HM_PRIO_RANK = {HM_LBL_P1: 1, HM_LBL_P2: 2, HM_LBL_P3: 3,
+                HM_LBL_P4: 4, HM_LBL_P5: 5, HM_LBL_P6: 6, '': 9}
+
+
+def _hm_action_priority(hp_pr, hp_po, po_num, po_dt, today_ts):
+    """KPI 2 Action Priority -> descriptive label (matches po_status_heatmap.xlsx)."""
+    if hp_pr == 'No' and hp_po == 'No':
+        return HM_LBL_P1
+    if hp_pr == 'No' and hp_po == 'Yes':
+        if str(po_num).strip().startswith('101'):
+            return HM_LBL_P3
+        d = pd.to_datetime(po_dt, errors='coerce')
+        if pd.notna(d) and (today_ts - d).days <= 30:
+            return HM_LBL_P5
+        return HM_LBL_P2
+    if hp_pr == 'Yes' and hp_po == 'No':
+        return HM_LBL_P4
+    if hp_pr == 'Yes' and hp_po == 'Yes':
+        return HM_LBL_P6
+    return ''
+
+
+def build_po_status_map(df):
+    """
+    Per (product, site, mpn, catalog_reference) group, compute the PO-status
+    heatmap cell value using the same inclusion rule as the KPI 2 detail:
+      - "On Hand" if ANY APN in the group has OH > 0.
+      - else "Not in APM" if the whole group has no APN.
+      - else the most actionable (lowest-rank) Action Priority across its APNs.
+    Returns dict keyed (product, site, mpn_stripped, catref_stripped) -> status.
+    """
+    today_ts = pd.Timestamp(date.today())
+    d = df.copy()
+    d['_oh'] = pd.to_numeric(d['site_oh_qty'], errors='coerce')
+    hp = pd.to_numeric(d.get('has_active_pr'), errors='coerce').fillna(0)
+    d['_has_pr_row'] = hp == 1
+    pon = d.get('po_number')
+    d['_has_po_row'] = pon.apply(
+        lambda v: pd.notna(v) and str(v).strip() not in ('', 'nan'))
+    d['_nia'] = d['mapping_status'] == 'No APN found'
+    d['_po_dt'] = pd.to_datetime(d.get('po_date'), errors='coerce')
+
+    grp_cols = ['product', 'site', 'mpn', 'catalog_reference']
+    status = {}
+    for (product, site, mpn, catref), g in d.groupby(grp_cols, dropna=False):
+        key = (product, site, str(mpn).strip(), str(catref).strip())
+        if (g['_oh'].fillna(0) > 0).any():
+            status[key] = 'On Hand'
+            continue
+        if g['_nia'].all():
+            status[key] = 'Not in APM'
+            continue
+        # Group-level flags: a part HAS a PR / PO if ANY of its APNs does.
+        has_pr = 'Yes' if g['_has_pr_row'].any() else 'No'
+        po_rows = g[g['_has_po_row']]
+        has_po = 'Yes' if not po_rows.empty else 'No'
+        # When several APNs have open POs, use the most RECENT one to classify
+        # P2/P3/P5 (matches the report keeping the latest open PO per APN+site).
+        po_num, po_dt = '', None
+        if not po_rows.empty:
+            po_sorted = po_rows.sort_values('_po_dt', ascending=False, na_position='last')
+            po_num = po_sorted.iloc[0].get('po_number', '')
+            po_dt = po_sorted.iloc[0].get('po_date', None)
+        st = _hm_action_priority(has_pr, has_po, po_num, po_dt, today_ts)
+        status[key] = st if st else 'Not in APM'
+    return status
+
+
+def build_not_onhand_export(df, status_map):
+    """
+    One record per (product, site, MPN, CRN) group that is NOT 'On Hand', with
+    the open PO number(s) tied to that MPN/CRN+site.
+
+    PO numbers come from po_number on the group's rows (the report's open-PO set:
+    ord_status in A/PR, orl_status A, latest per APN+site). A group can span
+    several APNs, so we list every distinct open PO for the group, '; '-joined.
+    APN and Description are also '; '-joined across the group's rows.
+    Returns a list of dicts (JSON-serializable) for the in-page CSV exporter.
+    """
+    d = df.copy()
+    d['_mpn'] = d['mpn'].fillna('').astype(str).str.strip()
+    d['_crn'] = d['catalog_reference'].fillna('').astype(str).str.strip()
+
+    def join_unique(series):
+        seen, out = set(), []
+        for v in series:
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s in ('', 'nan') or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+        return '; '.join(out)
+
+    records = []
+    grp_cols = ['product', 'site', '_mpn', '_crn']
+    for (product, site, mpn, crn), g in d.groupby(grp_cols, dropna=False):
+        status = status_map.get((product, site, mpn, crn), '')
+        if status == 'On Hand' or status == '':
+            continue  # keep only not-On-Hand groups
+        # open PO numbers for this group
+        po_nums = join_unique(g.get('po_number', pd.Series(dtype=str)))
+        po_dates = join_unique(g.get('po_date', pd.Series(dtype=str)))
+        apns = join_unique(g.get('r5_apn', pd.Series(dtype=str)))
+        desc = join_unique(g.get('part_description', pd.Series(dtype=str)))
+        oh = pd.to_numeric(g['site_oh_qty'], errors='coerce').fillna(0)
+        oh_val = oh.max()
+        records.append({
+            'Product': product,
+            'Site': site,
+            'MPN': mpn,
+            'CRN': crn,
+            'APN': apns,
+            'Description': desc,
+            'OH Qty': ('' if g['site_oh_qty'].isna().all() else
+                       (int(oh_val) if float(oh_val).is_integer() else oh_val)),
+            'Status': status,
+            'PO #': po_nums,
+            'PO Date': po_dates,
+        })
+    records.sort(key=lambda r: (r['Product'], r['Site'], r['MPN'], r['CRN']))
+    return records
+
+
+def build_po_status_heatmap_html(df, status_map, products, table_id='tab7_heatmap'):
+    """
+    One concatenated heatmap grid per product (rows = MPN/CatRef, cols = sites),
+    all in a single table. Each product's block is tagged data-product so the
+    product filter can show exactly one at a time. Columns are rebuilt per
+    product block via per-cell data-site; the header row is swapped by JS.
+    """
+    # Precompute, per product: ordered sites and distinct MPN/CatRef pairs.
+    blocks = {}
+    for prod in products:
+        sub = df[df['product'] == prod]
+        sites = sorted(sub['site'].dropna().unique().tolist())
+        pairs = (sub[['mpn', 'catalog_reference']].fillna('').astype(str)
+                 .apply(lambda c: c.str.strip())
+                 .drop_duplicates().sort_values(['mpn', 'catalog_reference']))
+        pairs = list(pairs.itertuples(index=False, name=None))
+        blocks[prod] = (sites, pairs)
+
+    html = (f'<div style="overflow:auto;max-height:78vh;">'
+            f'<table id="{table_id}" style="font-size:12px;border-collapse:collapse;">')
+    for prod in products:
+        sites, pairs = blocks[prod]
+        # Header row for this product block
+        html += (f'<tr class="hm-head" data-product="{prod}">'
+                 f'<th style="position:sticky;left:0;top:0;background:#232f3e;color:#fff;'
+                 f'z-index:3;min-width:170px;padding:6px;text-align:left;">MPN</th>'
+                 f'<th style="position:sticky;left:170px;top:0;background:#232f3e;color:#fff;'
+                 f'z-index:3;min-width:90px;padding:6px;text-align:left;">CatRef</th>')
+        for s in sites:
+            html += (f'<th style="position:sticky;top:0;background:#232f3e;color:#fff;'
+                     f'z-index:1;min-width:60px;padding:6px 4px;text-align:center;'
+                     f'font-size:11px;">{s}</th>')
+        html += '</tr>\n'
+        # Data rows
+        for mpn, catref in pairs:
+            html += (f'<tr class="hm-row" data-product="{prod}" data-mpn="{mpn}">'
+                     f'<td style="position:sticky;left:0;background:#fff;z-index:2;'
+                     f'white-space:nowrap;font-weight:500;border-right:1px solid #ddd;'
+                     f'padding:4px 6px;">{mpn}</td>'
+                     f'<td style="position:sticky;left:170px;background:#fff;z-index:2;'
+                     f'white-space:nowrap;font-size:11px;border-right:2px solid #232f3e;'
+                     f'padding:4px 6px;">{catref}</td>')
+            for s in sites:
+                st = status_map.get((prod, s, str(mpn), str(catref)), '')
+                bg, fg = HM_COLORS.get(st, ('#f2f2f2', '#808080'))
+                html += (f'<td style="background:{bg};color:{fg};padding:4px;'
+                         f'text-align:center;font-size:11px;white-space:nowrap;">{st}</td>')
+            html += '</tr>\n'
+    html += '</table></div>'
+    return html
 
 
 def html_table(df, table_id=None, show_product=False):
@@ -561,24 +758,54 @@ def generate_report():
         out7 = pd.DataFrame()
         n_total = n_nia = n_stockout = n_no_pr = 0
 
-    tab7 = "<h2>KPI 2: Unavailable Parts &mdash; PR/PO Status</h2>"
+    # KPI 2 visual: per-product PO-status heatmap (rows = MPN/CatRef, cols = sites).
+    # Product is a filter (default URL Rev D); cells carry the Action Priority
+    # status, colored red/green/yellow (matches po_status_heatmap.xlsx).
+    kpi2_default_product = 'URL Rev D' if 'URL Rev D' in products else (products[0] if products else 'all')
+    kpi2_product_opts = ''.join(
+        f'<option value="{p}"{" selected" if p == kpi2_default_product else ""}>{p}</option>'
+        for p in products)
+    po_status_map = build_po_status_map(df)
+    heatmap_html = build_po_status_heatmap_html(df, po_status_map, products)
+    # Data for the "not On Hand (with PO #)" CSV export, embedded as JSON.
+    not_onhand_records = build_not_onhand_export(df, po_status_map)
+    not_onhand_json = json.dumps(not_onhand_records)
+
+    # Legend chips
+    legend_items = [
+        ('On Hand', 'Stocked (OH > 0)'),
+        (HM_LBL_P5, 'Recent PO (<=30d), no PR'),
+        (HM_LBL_P6, 'PO & PR'),
+        (HM_LBL_P1, 'No PO & no PR'),
+        (HM_LBL_P2, 'Outdated PO (>30d), no PR'),
+        (HM_LBL_P4, 'PR, no PO'),
+        (HM_LBL_P3, 'APM-only PO (101#, no PR)'),
+        ('Not in APM', 'No APN mapping in APM'),
+    ]
+    legend_html = '<div style="margin:8px 0;display:flex;flex-wrap:wrap;gap:6px;font-size:11px;">'
+    for lbl, meaning in legend_items:
+        bg, fg = HM_COLORS.get(lbl, ('#f2f2f2', '#808080'))
+        legend_html += (f'<span style="background:{bg};color:{fg};padding:2px 8px;'
+                        f'border-radius:3px;" title="{meaning}">{lbl}</span>')
+    legend_html += '</div>'
+
+    tab7 = "<h2>KPI 2: Unavailable Parts &mdash; PR/PO Status Heatmap</h2>"
     tab7 += f"""<div class="filter-bar">
-  <label>Product: </label><select onchange="applyProductFilter()" id="tab7_product_filter">{product_opts}</select>
-  <label>Site: </label><select onchange="filterTab7Detail()" id="tab7_site_filter">{site_opts}</select>
-  <label>Action Priority: </label><select onchange="filterTab7Detail()" id="tab7_prio_filter"><option value="all">All</option><option value="P1">P1: No PO &amp; No PR</option><option value="P2">P2: Outdated PO, No PR</option><option value="P3">P3: APM-only PO - needs data validation</option><option value="P4">P4: PR, No PO</option><option value="P5">P5: Recent PO, No PR - no action required</option><option value="P6">P6: PO &amp; PR - no action required</option><option value="NIA">Not in APM</option></select>
-  <label>Has PR: </label><select onchange="filterTab7Detail()" id="tab7_haspr_filter"><option value="all">All</option><option value="Yes">Yes</option><option value="No">No</option></select>
-  <label>Has PO: </label><select onchange="filterTab7Detail()" id="tab7_haspo_filter"><option value="all">All</option><option value="Yes">Yes</option><option value="No">No</option></select>
-  <label>MPN Search: </label><input type="text" id="tab7_mpn_search" onkeyup="filterTab7Detail()" placeholder="Type MPN..." style="padding:4px 8px">
+  <label>Product: </label><select onchange="filterTab7Heatmap()" id="tab7_product_filter">{kpi2_product_opts}</select>
+  <label>MPN Search: </label><input type="text" id="tab7_mpn_search" onkeyup="filterTab7Heatmap()" placeholder="Type MPN..." style="padding:4px 8px">
 </div>"""
-    tab7 += '<p id="tab7_summary"></p>'
     tab7 += ('<div style="margin:10px 0;padding:10px 12px;background:#fff3cd;'
              'border-left:4px solid #ff9900;border-radius:4px;font-size:13px;">'
-             '<b>P3 &mdash; APM-only PO (needs data validation):</b> These parts have an '
+             '<b>APM-only PO (needs data validation):</b> parts with an '
              'APM-only PO (number starting with 101, no Coupa PO) with a received quantity, '
              'yet never appear as available inventory in APM (r5stock). RME ISP needs to '
              'confirm what happened to these received parts.</div>')
-    tab7 += '<button class="export-btn" onclick="exportTableCSV(\'tab7_detail\',\'kpi2_unavailable_parts_pr_po.csv\')">Export CSV</button>'
-    tab7 += html_table(out7, table_id='tab7_detail', show_product=True)
+    tab7 += legend_html
+    tab7 += ('<button class="export-btn" onclick="exportTableCSV(\'tab7_heatmap\',\'kpi2_po_status_heatmap.csv\')">Export heatmap CSV</button>'
+             '<button class="export-btn" style="margin-left:8px;" '
+             'onclick="exportNotOnHand()">Export not-On-Hand (with PO #)</button>')
+    tab7 += f'<script id="kpi2_not_onhand_data" type="application/json">{not_onhand_json}</script>'
+    tab7 += heatmap_html
 
     # =========================================================================
     # BUILD HTML
@@ -605,10 +832,8 @@ def generate_report():
   .filter-bar {{ margin: 10px 0; padding: 10px; background: #eee; border-radius: 4px; }}
   .filter-bar select {{ padding: 4px 8px; margin-right: 10px; }}
   .filter-bar label {{ font-weight: bold; margin-right: 4px; }}
-  /* KPI 2 (tab7): narrow the Description column (6th col) */
-  #tab7_detail td:nth-child(6), #tab7_detail th:nth-child(6) {{
-    max-width: 160px; white-space: normal; word-break: break-word; font-size: 11px;
-  }}
+  /* KPI 2 (tab7): PO-status heatmap cells keep tight borders */
+  #tab7_heatmap td, #tab7_heatmap th {{ border: 1px solid #e3e3e3; }}
   .export-btn {{ margin: 6px 0; padding: 5px 12px; background: #ff9900; color: #232f3e;
     border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }}
   .export-btn:hover {{ background: #e88a00; }}
@@ -672,7 +897,7 @@ function applyProductFilter() {{
   else if (tabId === 'tab4') {{ filterSiteTable('tab4_site'); filterTab4Detail(); }}
   else if (tabId === 'tab5') {{ filterSiteTable('tab5_site'); filterTab5Detail(); }}
   else if (tabId === 'tab6') filterHeatmap();
-  else if (tabId === 'tab7') filterTab7Detail();
+  else if (tabId === 'tab7') filterTab7Heatmap();
 }}
 
 function getProductVal(tabPrefix) {{
@@ -826,60 +1051,26 @@ function filterTab5Detail() {{
   }});
 }}
 
-function filterTab7Detail() {{
-  var siteVal = document.getElementById('tab7_site_filter').value;
-  var mpnVal = document.getElementById('tab7_mpn_search').value.toLowerCase();
+// KPI 2 PO-status heatmap: show one product block (header + rows) at a time,
+// filtered by the MPN search box. The table holds one header row and the data
+// rows for every product, each tagged data-product.
+function filterTab7Heatmap() {{
   var prodVal = getProductVal('tab7');
-  var hasPrEl = document.getElementById('tab7_haspr_filter');
-  var hasPoEl = document.getElementById('tab7_haspo_filter');
-  var prioEl = document.getElementById('tab7_prio_filter');
-  var hasPrVal = hasPrEl ? hasPrEl.value : 'all';
-  var hasPoVal = hasPoEl ? hasPoEl.value : 'all';
-  var prioVal = prioEl ? prioEl.value : 'all';
-  var table = document.getElementById('tab7_detail');
+  var mpnEl = document.getElementById('tab7_mpn_search');
+  var mpnVal = mpnEl ? mpnEl.value.toLowerCase() : '';
+  var table = document.getElementById('tab7_heatmap');
   if (!table) return;
-  // Column indices: Site=1, MPN=2, CRN=3, APM Status=7, Has PR=9, Has PO=14.
-  // Summary counts are DISTINCT MPN/CRN (a part may span multiple APN rows).
-  var totalSet = {{}}, niaSet = {{}}, stockoutSet = {{}}, noPrSet = {{}};
-  var rows = table.querySelectorAll('tr[data-product]');
-  rows.forEach(function(row) {{
-    var rowProd = row.getAttribute('data-product');
-    var cells = row.querySelectorAll('td');
-    if (cells.length < 15) return;
-    var rowSite = cells[1].textContent;
-    var rowMpn = cells[2].textContent.toLowerCase();
-    var rowHasPr = cells[9].textContent.trim();
-    var rowHasPo = cells[14].textContent.trim();
-    var rowPrio = cells[8].textContent.trim();
-    var showProd = (prodVal === 'all' || rowProd === prodVal);
-    var showSite = (siteVal === 'all' || rowSite === siteVal);
-    var showMpn = (mpnVal === '' || rowMpn.indexOf(mpnVal) >= 0);
-    var showPr = (hasPrVal === 'all' || rowHasPr === hasPrVal);
-    var showPo = (hasPoVal === 'all' || rowHasPo === hasPoVal);
-    var showPrio = (prioVal === 'all'
-      || (prioVal === 'NIA' && rowPrio === '')
-      || (prioVal !== 'NIA' && rowPrio.indexOf(prioVal) === 0));
-    var show = showProd && showSite && showMpn && showPr && showPo && showPrio;
-    row.style.display = show ? '' : 'none';
-    if (show) {{
-      // key on product+site+MPN+CRN so distinct parts are counted once
-      var key = rowProd + '|' + rowSite + '|' + cells[2].textContent + '|' + cells[3].textContent;
-      totalSet[key] = 1;
-      var apmStatus = cells[7].textContent.trim();
-      if (apmStatus === 'Not available in APM') {{ niaSet[key] = 1; }}
-      else {{ stockoutSet[key] = 1; if (cells[9].textContent.trim() === 'No') {{ noPrSet[key] = 1; }} }}
-    }}
+  // Header rows: show only the selected product's header.
+  table.querySelectorAll('tr.hm-head').forEach(function(hr) {{
+    hr.style.display = (hr.getAttribute('data-product') === prodVal) ? '' : 'none';
   }});
-  var total = Object.keys(totalSet).length;
-  var nia = Object.keys(niaSet).length;
-  var stockout = Object.keys(stockoutSet).length;
-  var noPr = Object.keys(noPrSet).length;
-  var el = document.getElementById('tab7_summary');
-  if (el) {{
-    el.innerHTML = 'MPN/CRN with 0/NULL on-hand or not in APM: <b>' + total + '</b> ' +
-      '(stocked out in APM: ' + stockout + ', of which no active PR: ' + noPr + '; ' +
-      'not available in APM: ' + nia + ')';
-  }}
+  // Data rows: show selected product's rows matching the MPN search.
+  table.querySelectorAll('tr.hm-row').forEach(function(row) {{
+    var rowProd = row.getAttribute('data-product');
+    var rowMpn = (row.getAttribute('data-mpn') || '').toLowerCase();
+    var show = (rowProd === prodVal) && (mpnVal === '' || rowMpn.indexOf(mpnVal) >= 0);
+    row.style.display = show ? '' : 'none';
+  }});
 }}
 
 function filterHeatmap() {{
@@ -936,14 +1127,19 @@ function exportTableCSV(tableId, filename) {{
     return v;
   }}
   var lines = [];
-  var headerCells = table.querySelectorAll('tr th');
-  if (headerCells.length) {{
-    lines.push(Array.prototype.map.call(headerCells, function(th) {{ return esc(th.textContent); }}).join(','));
-  }}
   var rows = table.querySelectorAll('tr');
+  var headerDone = false;
   rows.forEach(function(row) {{
-    if (row.querySelectorAll('th').length) return;          // skip header row
-    if (row.offsetParent === null || row.style.display === 'none') return;  // visible only
+    if (row.style.display === 'none') return;                // visible rows only
+    var ths = row.querySelectorAll('th');
+    if (ths.length) {{
+      // Use the FIRST visible header row (handles per-product header rows).
+      if (!headerDone) {{
+        lines.push(Array.prototype.map.call(ths, function(th) {{ return esc(th.textContent); }}).join(','));
+        headerDone = true;
+      }}
+      return;
+    }}
     var cells = row.querySelectorAll('td');
     if (!cells.length) return;
     lines.push(Array.prototype.map.call(cells, function(td) {{ return esc(td.textContent); }}).join(','));
@@ -956,10 +1152,36 @@ function exportTableCSV(tableId, filename) {{
   URL.revokeObjectURL(url);
 }}
 
+// KPI 2: export the not-On-Hand parts (with open PO #) for the selected product.
+function exportNotOnHand() {{
+  var el = document.getElementById('kpi2_not_onhand_data');
+  if (!el) return;
+  var data = JSON.parse(el.textContent || '[]');
+  var prodVal = getProductVal('tab7');
+  var rows = data.filter(function(r) {{ return prodVal === 'all' || r.Product === prodVal; }});
+  var cols = ['Product','Site','MPN','CRN','APN','Description','OH Qty','Status','PO #','PO Date'];
+  function esc(v) {{
+    v = (v == null ? '' : String(v));
+    if (/[",\\n]/.test(v)) {{ v = '"' + v.replace(/"/g, '""') + '"'; }}
+    return v;
+  }}
+  var lines = [cols.join(',')];
+  rows.forEach(function(r) {{
+    lines.push(cols.map(function(c) {{ return esc(r[c]); }}).join(','));
+  }});
+  var tag = (prodVal === 'all' ? 'all_products' : prodVal.replace(/[^A-Za-z0-9]+/g, '_'));
+  var blob = new Blob(['\\ufeff' + lines.join('\\n')], {{ type: 'text/csv;charset=utf-8;' }});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'kpi2_not_onhand_' + tag + '.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}}
+
 // On page load, apply KPI5 default product filter (USP) and populate KPI7 summary
 document.addEventListener('DOMContentLoaded', function() {{
   filterHeatmap();
-  filterTab7Detail();
+  filterTab7Heatmap();
 }});
 </script>
 </body>

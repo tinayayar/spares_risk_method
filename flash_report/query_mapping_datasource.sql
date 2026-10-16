@@ -47,16 +47,16 @@ WITH rspl AS (
 ),
 
 target_sites AS (
-  -- USP NA sites (23, Rev 6.NA) — use "default"."rspl_target_parts"
+  -- USP NA sites (22, Rev 6.NA) — use "default"."rspl_target_parts"
   SELECT site, 'USP' AS product FROM (VALUES
-    ('AUS2'), ('DEN4'), ('DEN9'), ('ELP1'), ('FSD1'), ('FWA6'), ('GEG1'),
+    ('DEN4'), ('DEN9'), ('ELP1'), ('FSD1'), ('FWA6'), ('GEG1'),
     ('IAG1'), ('ILM1'), ('MQY1'), ('OMA2'), ('ORF4'), ('ORH3'), ('PAE2'), ('PDX8'),
     ('SBD6'), ('SHV1'), ('VGT1'), ('YEG2'), ('YHM1'), ('YOW3'), ('YXU1'), ('YYC4')
   ) AS t(site)
   UNION ALL
-  -- USP NA B1 sites (31, Rev B1) — use "default"."rspl_target_parts_usp_b1"
+  -- USP NA B1 sites (32, Rev B1) — use "default"."rspl_target_parts_usp_b1"
   SELECT site, 'USP_B1' AS product FROM (VALUES
-    ('ABQ1'), ('AGS1'), ('AKC1'), ('BDL4'), ('BOS3'), ('BWI2'), ('DAB2'), ('DET6'),
+    ('ABQ1'), ('AGS1'), ('AKC1'), ('AUS2'), ('BDL4'), ('BOS3'), ('BWI2'), ('DAB2'), ('DET6'),
     ('GYR1'), ('HOU6'), ('IGQ1'), ('LUK2'), ('MKC6'), ('MLI1'), ('MTN1'), ('ORD5'),
     ('ORF3'), ('OXR1'), ('PVD2'), ('RIC4'), ('RIC6'), ('SAN3'), ('SAT3'), ('SAV4'),
     ('SBN1'), ('SCK6'), ('SYR1'), ('TLH2'), ('TPA4'), ('TUL2'), ('TYS1')
@@ -70,14 +70,11 @@ target_sites AS (
     ('OVD1'), ('RMU1')
   ) AS t(site)
   UNION ALL
-  -- URL Rev C sites (1)
-  SELECT site, 'URL Rev C' AS product FROM (VALUES
-    ('SHV1')
-  ) AS t(site)
-  UNION ALL
-  -- URL Rev C2 sites (8) — ORF3/ORF4 have both Rev C and Rev C2
+  -- URL Rev C2 sites (9) — SHV1 moved here from Rev C (Rev C now has no sites).
+  -- ORF3/ORF4 have both Rev C and Rev C2.
   SELECT site, 'URL Rev C2' AS product FROM (VALUES
-    ('CLE3'), ('BCN4'), ('ORH3'), ('PAE2'), ('DEN9'), ('IAG1'), ('ORF3'), ('ORF4')
+    ('CLE3'), ('BCN4'), ('ORH3'), ('PAE2'), ('DEN9'), ('IAG1'), ('ORF3'), ('ORF4'),
+    ('SHV1')
   ) AS t(site)
   UNION ALL
   -- URL Rev D sites (13) — 10 live + 3 upcoming (RIC6, LUK2, DUS4)

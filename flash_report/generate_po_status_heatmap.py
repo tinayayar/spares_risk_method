@@ -260,6 +260,10 @@ def main():
         sub = df[df['product'] == product].copy()
         sites = sorted(sub['site'].dropna().unique().tolist())
         pairs = product_pairs(sub)
+        if not sites or not pairs:
+            # Product retired / no sites (e.g. URL Rev C after SHV1 moved to C2).
+            print(f"  {title}: skipped (no sites/rows)")
+            continue
         n = write_sheet(wb, title, product, pairs, status_map, sites)
         print(f"  {title}: {n} MPNs x {len(sites)} sites")
 
